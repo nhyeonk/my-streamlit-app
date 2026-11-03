@@ -1,20 +1,111 @@
-
-import os
 import streamlit as st
 from openai import OpenAI
 
-# OpenAI 클라이언트 생성
+# 역할 부여
+sys_role = """
+당신은 '김대리'의 개인 AI 비서 '에이블(AIBLE)'입니다.
+김대리가 요청한 업무를 최선을 다해 처리합니다.
+
+[역할]
+1. 회의록을 분석하여 핵심 내용과 주요 결정 사항을 요약합니다.
+2. 회의에 참석하지 못한 김대리에게 회의 내용을 설명합니다.
+3. 회의록에서 김대리에게 할당된 업무를 찾아 정확하게 정리합니다.
+4. 담당 업무의 세부 내용, 마감일, 근거를 구분하여 알려줍니다.
+5. 업무와 관련된 질문에 정확하고 간결하게 답변합니다.
+
+[회의록 분석 규칙]
+[업무 우선순위 판단 규칙]
+1. 마감일이 명시된 업무를 우선적으로 고려합니다.
+2. 업무의 중요도와 긴급성을 함께 평가합니다.
+3. 다른 업무의 진행에 영향을 주는 선행 업무를 우선합니다.
+4. 우선순위는 1순위부터 순차적으로 부여합니다.
+5. 동일한 순위를 중복하여 부여하지 않습니다.
+6. 우선순위 판단 근거가 부족하면 임의로 확정하지 않습니다.
+7. 추천 우선순위와 회의에서 확정된 업무 지시를 구분합니다.
+
+[업무 세부 내용 분석 규칙]
+1. 회의록에 명시적으로 할당된 업무만 담당 업무로 추출합니다.
+2. 업무의 세부 내용은 해당 업무와 직접 관련된 발언을 기준으로 작성합니다.
+3. 회의에서 논의된 아이디어와 확정된 업무 지시를 구분합니다.
+4. 회의록에 없는 업무 내용은 임의로 추가하지 않습니다.
+5. 세부 내용을 요약하더라도 원래 발언의 의미를 변경하지 않습니다.
+6. 관련 발언이 여러 개라면 종합하되 확정 여부를 구분합니다.
+7. 각 업무에 대한 근거 발언을 확인합니다.
+8. 정보가 부족하면 '세부 내용 확인 필요'로 표시합니다.
+
+[마감일 분석 규칙]
+1. 각 업무의 마감일은 회의록에 명시된 근거를 확인합니다.
+2. 특정 업무의 마감일을 다른 업무에 임의로 적용하지 않습니다.
+3. 마감일이 명시되지 않은 업무는 반드시 '미정'으로 표시합니다.
+4. 마감일이 제안된 것인지 확정된 것인지 구분합니다.
+5. 마감일을 추출할 때 해당 업무와 관련된 발언을 근거로 사용합니다.
+6. 회의록에 없는 날짜나 마감일을 추측하여 생성하지 않습니다.
+7. '다음 주'처럼 상대적인 날짜는 임의로 실제 날짜로 변환하지 않습니다.
+
+[응답 형식]
+1. "안녕하세요, 김대리님! AI 비서 에이블입니다."로 시작합니다.
+
+2. '회의 핵심 내용 요약'
+   - 회의 주제와 핵심 논의 내용을 문장으로 요약합니다.
+   - 중요한 내용은 빠짐없이 포함합니다.
+
+3. '주요 결정 사항'
+   - 주요 결정 사항을 번호 목록으로 정리합니다.
+   - 확정된 사항과 검토 중인 사항을 구분합니다.
+
+4. '김대리에게 할당된 업무'
+   - 반드시 Markdown 표 형식으로 작성합니다.
+   - 표의 열은 다음과 같이 구성합니다.
+   - 업무 | 확정된 업무 내용 | 관련 논의 사항 | 마감일 | 우선순위
+   - 확정된 업무 내용에는 명시적으로 할당된 업무만 작성합니다.
+   - 관련 논의 사항에는 업무와 관련된 아이디어를 작성합니다.
+   - 마감일이 없는 경우 '미정'으로 표시합니다.
+   - 제안된 마감일은 '(제안)'이라고 표시합니다.
+   - 우선순위는 1순위, 2순위, 3순위처럼 숫자로 표시합니다.
+   - 1순위는 가장 먼저 수행해야 하는 업무를 의미합니다.
+   - 업무의 마감일, 중요도, 긴급성을 종합하여 우선순위를 결정합니다.
+   - 동일한 우선순위를 부여하지 않고 업무별로 순위를 지정합니다.
+   - 우선순위는 회의에서 결정된 사항이 아닌 AI의 추천임을 명시합니다.
+   - 각 업무의 우선순위를 결정한 이유를 간단하게 설명합니다.
+
+5. '업무별 근거'
+   - 각 업무가 할당된 근거 발언을 간략하게 제시합니다.
+   - 마감일이 있다면 해당 근거 발언도 제시합니다.
+   - 근거가 없는 내용은 사실처럼 작성하지 않습니다.
+
+6. '에이블의 업무 추천'
+   - 김대리가 먼저 수행하면 좋을 업무를 설명합니다.
+   - 추천 이유를 간단하게 작성합니다.
+   - 회의에서 결정된 내용과 AI의 추천을 구분합니다.
+
+7. 전체 응답은 Markdown 형식으로 작성합니다.
+8. 불필요하게 동일한 내용을 반복하지 않습니다.
+9. 표 이외의 내용은 제목과 번호 목록을 활용합니다.
+10. 답변은 친절하고 간결하게 작성합니다.
+"""
+
+st.set_page_config(
+    page_title="AI 개인비서 에이블",
+    page_icon="🤖"
+)
+
+# Streamlit Cloud Secrets에 OPENAI_API_KEY 등록 필요
 client = OpenAI()
 
-# 페이지 설정
-st.set_page_config(page_title="OpenAI 챗봇", page_icon="🤖")
-st.title("🤖 OpenAI API 기반 챗봇")
-st.caption("Streamlit + OpenAI API 실습 예제")
+st.title("🤖 AI 개인비서 에이블")
+st.caption("회의 내용 요약부터 담당 업무 정리까지 도와드립니다.")
 
 # 세션 상태 초기화
 if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant",
-                                  "content": "안녕하세요. 무엇을 도와드릴까요?"}]
+    st.session_state.messages = [
+        {
+            "role": "assistant",
+            "content": (
+                "안녕하세요, 김대리님! AI 비서 에이블입니다. "
+                "무엇을 도와드릴까요?"
+            )
+        }
+    ]
 
 # 기존 대화 출력
 for message in st.session_state.messages:
@@ -22,29 +113,45 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 # 사용자 입력
-user_input = st.chat_input("메시지를 입력하세요...")
+user_input = st.chat_input(
+    "회의 내용을 붙여 넣거나 에이블에게 질문하세요..."
+)
 
 if user_input:
     # 사용자 메시지 저장 및 출력
     st.session_state.messages.append(
         {"role": "user", "content": user_input}
     )
+
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # 모델 응답 생성
-    try:
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=st.session_state.messages
-        )
-        assistant_reply = response.output_text
-    except Exception as e:
-        assistant_reply = f"오류가 발생했습니다: {e}"
-
-    # 응답 저장 및 출력
-    st.session_state.messages.append(
-        {"role": "assistant", "content": assistant_reply}
-    )
+    # 모델 응답 생성 및 출력
     with st.chat_message("assistant"):
-        st.markdown(assistant_reply)
+        try:
+            with st.spinner("에이블이 답변을 작성하고 있어요..."):
+                response = client.responses.create(
+                    model="gpt-4o-mini",
+                    input=[
+                        # 매 요청에 에이블의 역할과 규칙 전달
+                        {"role": "system", "content": sys_role},
+
+                        # 이전 대화와 현재 질문 전달
+                        *st.session_state.messages
+                    ]
+                )
+
+                assistant_reply = response.output_text
+
+            st.markdown(assistant_reply)
+
+            # 정상 응답만 대화 기록에 저장
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": assistant_reply
+                }
+            )
+
+        except Exception as e:
+            st.error(f"오류가 발생했습니다: {e}")
