@@ -735,6 +735,134 @@ def search_summaries(keyword, date_from, date_to):
     except Exception as e:
         return {"status": "failed", "error": str(e)}
 
+# ---------------------------------------------------------------
+# PDF 회의 보고서: 추가 AI 호출 없이 저장된 요약을 문서화
+# ---------------------------------------------------------------
+def build_meeting_pdf(title, meeting_date, summary, saved_at):
+    import io
+    import re
+    from pathlib import Path
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        HRFlowable, LongTable
+    )
+
+    font_path = Path(__file__).resolve().parent / 'fonts' / 'NanumGothic-Regular.ttf'
+    if not font_path.is_file():
+        raise FileNotFoundError('fonts/NanumGothic-Regular.ttf 파일을 app.py 옆에 배치하세요.')
+    font = 'AbleNanum'
+    if font not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(font, str(font_path)))
+    navy = colors.HexColor('#15345A')
+    blue = colors.HexColor('#2563AB')
+    text_color = colors.HexColor('#243449')
+    body_style = ParagraphStyle('AbleBody', fontName=font, fontSize=10,
+        leading=18, wordWrap='CJK', textColor=text_color, spaceAfter=7,
+        alignment=TA_LEFT, splitLongWords=True)
+    heading_style = ParagraphStyle('AbleHeading', parent=body_style,
+        fontSize=12, leading=20, textColor=blue, spaceBefore=12,
+        spaceAfter=7, keepWithNext=True)
+    title_style = ParagraphStyle('AbleTitle', parent=body_style,
+        fontSize=22, leading=31, textColor=navy, spaceAfter=12)
+    small_style = ParagraphStyle('AbleSmall', parent=body_style,
+        fontSize=8, leading=13, textColor=colors.HexColor('#63758A'))
+    cell_style = ParagraphStyle('AbleCell', parent=body_style,
+        fontSize=8, leading=13, spaceAfter=0)
+
+    # ReportLab 태그로 해석되지 않도록 원문을 이스케이프합니다.
+    def safe(value):
+        value = str(value)
+        value = re.sub(r'\*\*(.*?)\*\*', r'\1', value)
+        value = value.replace('`', '')
+        return escape(value).replace('\n', '<br/>')
+
+    stream = io.BytesIO()
+    doc = SimpleDocTemplate(stream, pagesize=A4,
+        rightMargin=20*mm, leftMargin=20*mm,
+        topMargin=22*mm, bottomMargin=21*mm,
+        title=str(title), author='AI 개인비서 에이블')
+    story = [Paragraph('MEETING REPORT', small_style),
+             Spacer(1, 4*mm), Paragraph('회의 요약 보고서', title_style),
+             Paragraph(safe(title or '회의명 미정'), heading_style)]
+    meta = Table([
+        [Paragraph('회의 날짜', small_style), Paragraph(safe(meeting_date or '미정'), body_style)],
+        [Paragraph('요약 저장 시각', small_style), Paragraph(safe(saved_at or '미정'), body_style)]
+    ], colWidths=[32*mm, 138*mm])
+    meta.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F1F5FA')),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('LEFTPADDING', (0,0), (-1,-1), 10),
+        ('TOPPADDING', (0,0), (-1,-1), 8),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6)]))
+    story.extend([meta, Spacer(1, 8*mm), HRFlowable(width='100%', color=blue, thickness=1.2),
+                  Spacer(1, 4*mm)])
+    headings = ('한 줄 요약', '회의 개요', '결정 사항', '주요 결정 사항',
+                '액션 아이템', '미결 이슈 및 확인 필요 사항', '미결 이슈',
+                '회의 핵심 내용 요약', '김대리에게 할당된 업무', '업무별 근거', '에이블의 업무 추천')
+    lines = str(summary).splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        # Markdown 표가 있으면 PDF 표로 변환하고 헤더를 다음 페이지에도 반복
+        if (i+1 < len(lines) and '|' in line and
+                re.fullmatch(r'[\s|:\-]+', lines[i+1]) and '-' in lines[i+1]):
+            rows = [[v.strip() for v in line.strip('|').split('|')]]
+            i += 2
+            while i < len(lines) and '|' in lines[i] and lines[i].strip():
+                rows.append([v.strip() for v in lines[i].strip().strip('|').split('|')])
+                i += 1
+            count = max(map(len, rows))
+            data = [[Paragraph(safe(v), cell_style) for v in row + ['']*(count-len(row))] for row in rows]
+            table = LongTable(data, colWidths=[doc.width/count]*count,
+                              repeatRows=1, splitInRow=1, hAlign='LEFT')
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#DFEAF6')),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F5F8FC')]),
+                ('GRID', (0,0), (-1,-1), .4, colors.HexColor('#CCD7E3')),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('TOPPADDING', (0,0), (-1,-1), 7),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 7)]))
+            story.extend([table, Spacer(1, 4*mm)])
+            continue
+        cleaned = re.sub(r'^\s*(?:#{1,6}\s*|\d+[.)]\s*)', '', line).replace('**', '')
+        match = next((h for h in headings if cleaned == h or cleaned.startswith(h+':') or cleaned.startswith(h+' :')), None)
+        if match:
+            story.append(Paragraph(safe(match), heading_style))
+            rest = cleaned[len(match):].lstrip(' :：')
+            if rest:
+                story.append(Paragraph(safe(rest), body_style))
+        elif line.startswith('#'):
+            story.append(Paragraph(safe(cleaned), heading_style))
+        else:
+            story.append(Paragraph(safe(line), body_style))
+        i += 1
+    story.extend([Spacer(1, 7*mm), HRFlowable(width='100%', color=colors.HexColor('#DCE4ED')),
+                  Spacer(1, 3*mm), Paragraph(
+                      '저장된 AI 회의 요약을 문서화한 보고서입니다. 원문 회의록과 비교하여 내용을 확인하세요.', small_style)])
+
+    def footer(canvas, document):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor('#DCE4ED'))
+        canvas.line(20*mm, 16*mm, 190*mm, 16*mm)
+        canvas.setFont(font, 8)
+        canvas.setFillColor(colors.HexColor('#63758A'))
+        canvas.drawString(20*mm, 11*mm, '에이블 | 회의 요약 보고서')
+        canvas.drawRightString(190*mm, 11*mm, str(document.page))
+        canvas.restoreState()
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    return stream.getvalue()
+
+
 def render_records_tab(recipient):
     """회의 기록 탭: 저장된 요약을 검색하고, 메일로 보내거나 삭제한다."""
     keyword = st.text_input("🔎 회의 기록 검색", placeholder="회의명이나 내용 키워드")
@@ -748,6 +876,23 @@ def render_records_tab(recipient):
         with st.expander(f"📅 {d['meeting_date']}   {d['title']}"):
             st.text(d["summary"])
             st.caption(f"저장 시각: {d['saved_at']}")
+            # 요약이 수정되면 새 PDF를 만들도록 내용 기반 키 사용
+            pdf_key = 'meeting_pdf_' + hashlib.sha256(
+                json.dumps(d, ensure_ascii=False, sort_keys=True).encode('utf-8')
+            ).hexdigest()
+            if st.button("📄 PDF 보고서 만들기", key=f"make_pdf_{d['id']}"):
+                try:
+                    with st.spinner("PDF 보고서를 만드는 중..."):
+                        st.session_state[pdf_key] = build_meeting_pdf(
+                            d['title'], d['meeting_date'], d['summary'], d['saved_at'])
+                except Exception as e:
+                    st.error(f"PDF 생성 실패: {e}")
+            if pdf_key in st.session_state:
+                st.download_button(
+                    "📥 PDF 보고서 다운로드", data=st.session_state[pdf_key],
+                    file_name=f"meeting_report_{d['meeting_date']}_{d['id']}.pdf",
+                    mime="application/pdf", key=f"download_pdf_{d['id']}",
+                )
             c1, c2, _ = st.columns([1.3, 1, 2])
             if c1.button("📧 기본 수신자에게 보내기", key=f"mail_{d['id']}", disabled=not recipient):
                 r = send_email(recipient, f"[회의 요약] {d['title']} ({d['meeting_date']})", d["summary"])
