@@ -1,4 +1,3 @@
-
 import os
 import json
 import ssl
@@ -9,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from email.utils import parseaddr
 
 import pandas as pd
@@ -80,6 +80,93 @@ client = get_client()
 MODEL = "gpt-4.1-mini"
 
 # ---------------------------------------------------------------
+# 메일 본문 변환: 마크다운(■ 소제목, - 목록, | 표 |, **굵게**) → HTML 메일 / 깔끔한 텍스트
+# ---------------------------------------------------------------
+def md_blocks(text):
+    """본문을 블록 목록으로 나눈다. ("head"|"bullet"|"text"|"blank", 문자열) / ("table", [[칸, ...], ...])"""
+    blocks, table = [], []
+    for raw in (text or "").splitlines() + [""]:
+        line = raw.strip()
+        if line.startswith("|") and line.count("|") >= 2:          # 마크다운 표의 한 줄
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if not all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):   # |---|---| 구분선은 건너뜀
+                table.append(cells)
+            continue
+        if table:
+            rows = [r for r in table if any(r)]                     # 빈 행 제거
+            if len(rows) > 1:
+                blocks.append(("table", rows))
+            table = []
+        if not line:
+            blocks.append(("blank", ""))
+        elif line.startswith("■") or re.match(r"^#{1,6}\s", line):
+            blocks.append(("head", line.lstrip("■# ").strip()))
+        elif re.match(r"^[-*•·]\s+", line):
+            blocks.append(("bullet", re.sub(r"^[-*•·]\s+", "", line)))
+        else:
+            blocks.append(("text", line))
+    return blocks
+
+def inline_html(text):
+    """특수문자를 안전하게 바꾸고 **굵게**만 <b>로 살린다."""
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escape(text, quote=False))
+
+def body_to_html(text):
+    """메일 본문을 HTML로 바꾼다. 메일 앱 호환을 위해 스타일은 태그에 직접 넣는다."""
+    td = "border:1px solid #c8d1dc;padding:6px 10px;vertical-align:top;"
+    out, bullets = [], []
+
+    def flush_bullets():
+        if bullets:
+            out.append("<ul style='margin:4px 0 10px 0;padding-left:22px;'>" +
+                       "".join(f"<li style='margin:2px 0;'>{b}</li>" for b in bullets) + "</ul>")
+            bullets.clear()
+
+    for kind, value in md_blocks(text):
+        if kind != "bullet":
+            flush_bullets()
+        if kind == "head":
+            title, sep, rest = value.partition(":")
+            out.append(f"<h3 style='margin:18px 0 6px 0;font-size:16px;color:#1f3a5f;'>"
+                       f"■ {inline_html(title.strip())}</h3>")
+            if rest.strip():
+                out.append(f"<p style='margin:4px 0;'>{inline_html(rest.strip())}</p>")
+        elif kind == "bullet":
+            bullets.append(inline_html(value))
+        elif kind == "table":
+            head, *rows = value
+            n = max(len(r) for r in value)
+            html = ["<table style='border-collapse:collapse;margin:6px 0 12px 0;font-size:14px;'>",
+                    "<tr>" + "".join(f"<th style='{td}background:#e8eef7;text-align:left;white-space:nowrap;'>"
+                                     f"{inline_html(c)}</th>" for c in head + [""] * (n - len(head))) + "</tr>"]
+            for r in rows:
+                html.append("<tr>" + "".join(   # 짧은 칸(담당자, 우선순위 등)은 줄바꿈하지 않음
+                    f"<td style='{td}{'white-space:nowrap;' if len(c.replace('**', '')) <= 8 else ''}'>"
+                    f"{inline_html(c)}</td>" for c in r + [""] * (n - len(r))) + "</tr>")
+            out.append("".join(html) + "</table>")
+        elif kind == "text":
+            color = "color:#c0392b;font-weight:bold;" if "확인 필요" in value and "회의 날짜" in value else ""
+            out.append(f"<p style='margin:4px 0;{color}'>{inline_html(value)}</p>")
+    flush_bullets()
+    return ("<div style=\"font-family:'Malgun Gothic','Apple SD Gothic Neo',sans-serif;"
+            "font-size:14px;line-height:1.6;color:#222;\">" + "".join(out) + "</div>")
+
+def body_to_plain(text):
+    """HTML을 못 여는 메일 앱용: 표는 '담당자: … / 업무 내용: …' 줄로, **굵게** 기호는 제거."""
+    lines = []
+    for kind, value in md_blocks(text):
+        value = value.replace("**", "") if isinstance(value, str) else value
+        if kind == "table":
+            head, *rows = [[c.replace("**", "") for c in r] for r in value]
+            for i, r in enumerate(rows, start=1):
+                lines.append(f"{i}. " + " / ".join(f"{h}: {c}" for h, c in zip(head, r) if c))
+        elif kind == "bullet":
+            lines.append(f"- {value}")
+        else:
+            lines.append(value)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+# ---------------------------------------------------------------
 # 이메일 발송 함수 (외부 도구)
 # ---------------------------------------------------------------
 def send_email(to, subject, body):
@@ -92,7 +179,10 @@ def send_email(to, subject, body):
     if not isinstance(subject, str) or any(c in subject for c in "\r\n"):
         return {"status": "failed", "error": "올바른 메일 제목이 필요합니다."}
     try:
-        msg = MIMEText(body, "plain", "utf-8")
+        # 텍스트 + HTML을 함께 보냄: 메일 앱은 HTML(표가 표로 보임)을 우선 표시하고, 못 열면 텍스트를 표시
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body_to_plain(body), "plain", "utf-8"))
+        msg.attach(MIMEText(body_to_html(body), "html", "utf-8"))
         msg["Subject"], msg["From"], msg["To"] = subject, sender, to
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
             s.starttls(context=ssl.create_default_context())
