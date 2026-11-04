@@ -20,6 +20,7 @@ from html import escape
 
 # PDF 보고서 (reportlab: PDF 만들기 / pypdfium2: 화면 미리보기)
 import io
+import base64
 import urllib.request
 try:   # reportlab이 설치되지 않아도 앱은 동작하도록 (PDF 기능만 꺼짐)
     from reportlab.lib import colors
@@ -47,7 +48,7 @@ USER_AVATAR = "🧑‍💼"
 ROBOT_AVATAR = "🤖"    # 채팅 아바타 (이미지는 잘려 보여 이모지 사용)
 CHAT_HEIGHT = 400      # 대화 영역 높이(px)
 MAX_HISTORY = 10       # LLM에 전달하는 대화 개수
-KEEP_AUDIO = 10        # 음성을 보관하는 최근 답변 개수
+KEEP_AUDIO = 3         # 음성을 보관하는 최근 답변 개수 (음성을 화면에 직접 넣으므로 적게 유지)
 RECENT_OPEN = 6        # 펼쳐 두는 최근 메시지 개수 (나머지는 접기)
 
 # ---------------------------------------------------------------
@@ -633,7 +634,14 @@ def render_message(m, show_text=True, autoplay=False):
             else:
                 st.caption("(텍스트 숨김 모드: 음성으로 확인하세요)")
             if m.get("audio"):
-                st.audio(m["audio"], format="audio/mp3", autoplay=autoplay)
+                # st.audio는 음성 파일을 서버 주소로 따로 내려받는데, 답변 직후 화면을 다시 그리면(st.rerun)
+                # 그 주소가 사라져 0:00으로 보일 수 있음 → 음성 데이터를 화면에 직접 넣어 재생
+                b64 = base64.b64encode(m["audio"]).decode()
+                st.markdown(
+                    f'<audio controls {"autoplay" if autoplay else ""} style="width:100%" '
+                    f'src="data:audio/mpeg;base64,{b64}"></audio>',
+                    unsafe_allow_html=True,
+                )
 
 def transcript_text():
     lines = []
