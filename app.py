@@ -1,4 +1,3 @@
-
 import os
 import json
 import ssl
@@ -9,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from email.utils import parseaddr
 
 import pandas as pd
@@ -82,6 +82,42 @@ MODEL = "gpt-4.1-mini"
 # ---------------------------------------------------------------
 # 이메일 발송 함수 (외부 도구)
 # ---------------------------------------------------------------
+def _inline(text):
+    """**굵게** 만 HTML로 바꾼다 (나머지는 그대로 이스케이프)."""
+    text = escape(text)
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+
+def markdown_to_email_html(body):
+    """메일 본문(Markdown)을 메일 프로그램이 표로 보여 주는 HTML로 바꾼다."""
+    td = "border:1px solid #d0d7de;padding:6px 10px;vertical-align:top;"
+    th = td + "background:#f3f4f6;font-weight:bold;text-align:left;"
+    out, table = [], []
+
+    def flush_table():
+        rows = [r for r in table if not all(re.fullmatch(r":?-+:?", c) or not c for c in r)]
+        if rows:
+            html = ['<table style="border-collapse:collapse;margin:8px 0;font-size:14px;">']
+            for i, row in enumerate(rows):
+                style = th if i == 0 else td
+                tag = "th" if i == 0 else "td"
+                html.append("<tr>" + "".join(f'<{tag} style="{style}">{_inline(c)}</{tag}>' for c in row) + "</tr>")
+            html.append("</table>")
+            out.append("".join(html))
+        table.clear()
+
+    for line in body.split("\n"):
+        s = line.strip()
+        if s.startswith("|") and s.endswith("|"):
+            table.append([c.strip() for c in s.strip("|").split("|")])
+            continue
+        if table:
+            flush_table()
+        out.append(_inline(line) + "<br>" if s else "<br>")
+    if table:
+        flush_table()
+    return ('<div style="font-family:\'Malgun Gothic\',sans-serif;font-size:14px;line-height:1.6;">'
+            + "".join(out) + "</div>")
+
 def send_email(to, subject, body):
     sender = os.getenv("GMAIL_ADDRESS", "").strip()
     password = os.getenv("GMAIL_APP_PASSWORD", "").replace(" ", "")
@@ -92,8 +128,10 @@ def send_email(to, subject, body):
     if not isinstance(subject, str) or any(c in subject for c in "\r\n"):
         return {"status": "failed", "error": "올바른 메일 제목이 필요합니다."}
     try:
-        msg = MIMEText(body, "plain", "utf-8")
+        msg = MIMEMultipart("alternative")
         msg["Subject"], msg["From"], msg["To"] = subject, sender, to
+        msg.attach(MIMEText(body, "plain", "utf-8"))                          # HTML을 못 여는 메일앱용
+        msg.attach(MIMEText(markdown_to_email_html(body), "html", "utf-8"))  # 일반 메일앱은 이걸 표시
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
             s.starttls(context=ssl.create_default_context())
             s.login(sender, password)
