@@ -1841,10 +1841,6 @@ if st.session_state.voice_audio:
     if st.session_state.voice_error:
         st.warning(f"음성 인식 오류: {st.session_state.voice_error}")
         retry_voice = st.button("🔄 음성 인식 다시 시도", key="voice_retry")
-    if st.button("❌ 녹음 취소", key="voice_cancel"):
-        st.session_state.voice_audio = None
-        st.session_state.voice_error = None
-        st.rerun()
     if not st.session_state.voice_error or retry_voice:
         try:
             with st.spinner("음성을 텍스트로 변환하는 중..."):
