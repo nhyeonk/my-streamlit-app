@@ -460,7 +460,8 @@ def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
             role += f"\n[회의 날짜]\n{fmt_day(base)}\n\n[날짜 참고표] 회의 날짜 기준\n{build_date_guide(base)}\n"
         role += f"\n[회의 기록 시작]\n{meeting_text}\n[회의 기록 끝]\n"
     else:
-        role += "\n아직 회의 기록이 업로드되지 않았습니다. 회의 관련 요청이면 업로드를 안내하세요.\n"
+        role += ("\n지금 업로드된 회의록은 없습니다. 이미 요약해 저장한 회의(메일 발송, 다시 보기 등)는 "
+                 "search_summaries로 찾아 처리하고, 새 회의록 분석이 필요한 요청이면 업로드를 안내하세요.\n")
     role += deadline_context(deadlines)
     role += priority_context(st.session_state.get("priority_items", []))
     role += ("\n답변이 끝나면 필요할 때만, 김 대리가 이어서 해볼 만한 요청을 한 문장으로 짧게 제안하세요. "
@@ -580,6 +581,7 @@ def ask_able(user_text, history, meeting_text, recipient):
                                           arguments.get("summary", ""))
                     if result.get("status") == "success":
                         st.session_state.last_summary_id = result["id"]   # 대화 탭에 PDF 버튼 표시용
+                        st.session_state.clear_uploads = True   # 요약 저장이 끝나면 회의록 업로드 칸을 비움
                     st.session_state.deadline_changed = True   # 회의 기록 탭을 새 값으로 다시 그리기 위함
                 elif item.name == "search_summaries":
                     result = search_summaries(arguments.get("keyword", ""), arguments.get("date_from", ""),
@@ -1703,6 +1705,8 @@ defaults = {
     "last_summary_id": None, # 대화에서 마지막으로 저장한 회의 요약 (PDF 보고서용)
     "draft_id": 0,
     "recorder_key": 0,       # 녹음 위젯 초기화용
+    "uploader_key": 0,       # 회의록 업로드 칸 초기화용 (값을 바꾸면 업로드 칸이 비워짐)
+    "clear_uploads": False,  # 이번 요청에서 회의 요약을 저장했는지
     "last_audio_hash": None, # 이미 인식한 녹음 (중복 인식 방지)
     "voice_audio": None,     # 종료된 녹음을 위젯과 별도로 보관
     "voice_error": None,
@@ -1724,7 +1728,10 @@ with st.sidebar:
     with title_col:
         st.markdown("### 회의록")
     meeting_files = st.file_uploader("회의록(txt) 파일", type=["txt"], label_visibility="collapsed",
-                                     accept_multiple_files=True)
+                                     accept_multiple_files=True,
+                                     key=f"meeting_uploader_{st.session_state.uploader_key}")
+    if st.session_state.pop("uploads_cleared", False):
+        st.caption("✅ 회의 요약을 저장해서 회의록 업로드 칸을 비웠어요. 저장된 요약은 🗂️ 회의 기록 탭에 있어요.")
     meetings = []   # [{"name", "text", "date"}] 회의록별 내용과 회의 날짜
     for i, f in enumerate(meeting_files or []):
         raw = f.getvalue()
@@ -1993,6 +2000,13 @@ with chat_area:
             st.error(f"오류가 발생했습니다: {e}")
 
 # 에이블이 달력이나 회의 기록을 바꿨다면 해당 탭이 새 값으로 보이도록 화면을 한 번 다시 그림 (대화는 이미 저장됨)
+if st.session_state.clear_uploads:
+    # 요약 저장까지 끝난 요청이면 회의록 업로드 칸을 비움 (위젯 key를 바꾸면 새 빈 업로더가 됨)
+    st.session_state.clear_uploads = False
+    st.session_state.uploader_key += 1
+    st.session_state.uploads_cleared = True
+    st.session_state.deadline_changed = True
+
 if st.session_state.deadline_changed:
     st.session_state.deadline_changed = False
     st.session_state.autoplay_last = True
