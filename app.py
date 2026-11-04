@@ -1,39 +1,35 @@
 
-# 표준 라이브러리
-import calendar as pycal
-import hashlib
-import io
-import json
 import os
-import re
-import smtplib
+import json
 import ssl
-import urllib.request
-from datetime import date, datetime, timedelta
+import hashlib
+import smtplib
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.utils import parseaddr
-from html import escape
-from zoneinfo import ZoneInfo
 
-# 외부 라이브러리
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
 
-# PDF 보고서 생성 (reportlab)
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle
-from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (
-    HRFlowable, KeepTogether, Paragraph, SimpleDocTemplate,
-    Spacer, Table, TableStyle,
-)
+import calendar as pycal
+from html import escape
 
+# PDF 보고서 생성 (reportlab)
+import io
+import re
+import urllib.request
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                TableStyle, HRFlowable, KeepTogether)
 # ---------------------------------------------------------------
 # 페이지 설정
 # ---------------------------------------------------------------
@@ -209,9 +205,25 @@ summary_tools = [
             "properties": {
                 "title": {"type": "string", "description": "회의명. 예: 'A사 납품 일정 협의'"},
                 "meeting_date": {"type": "string", "description": "회의 날짜 YYYY-MM-DD"},
-                "summary": {"type": "string", "description": "사용자에게 전달한 요약본 전문"}
+                "summary": {"type": "string", "description": "사용자에게 전달한 요약본 전문"},
+                "kim_tasks": {
+                    "type": "array",
+                    "description": "김 대리에게 할당된 업무 목록. PDF 보고서의 업무 표로 들어간다. 없으면 빈 목록",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": {"type": "string", "description": "업무 이름"},
+                            "confirmed": {"type": "string", "description": "확정된 업무 내용"},
+                            "discussion": {"type": "string", "description": "관련 논의 사항. 없으면 '없음'"},
+                            "deadline": {"type": "string", "description": "'YYYY-MM-DD (원문: ...)' 또는 '미정'. 제안된 기한이면 끝에 '(제안)'"},
+                            "priority": {"type": "integer", "description": "에이블 추천 우선순위. 1부터 중복 없이"}
+                        },
+                        "required": ["task", "confirmed", "discussion", "deadline", "priority"],
+                        "additionalProperties": False
+                    }
+                }
             },
-            "required": ["title", "meeting_date", "summary"],
+            "required": ["title", "meeting_date", "summary", "kim_tasks"],
             "additionalProperties": False
         },
         "strict": True
@@ -292,7 +304,7 @@ def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
 특히 회의 기록을 분석해 핵심 내용, 결정 사항, 후속 조치를 정리하는 일을 잘하며, 회의나 업무 관련 요청에는 아래의 회의·도구 규칙을 따릅니다.
 '김대리'는 김 대리와 같은 사람입니다.
 김 대리의 요청을 최우선으로 처리하며, 한국어 존댓말로 말하세요.
-답변은 음성으로 읽어 줄 것이므로 표나 특수기호 없이 자연스러운 문장으로 작성하세요.
+답변은 음성으로 읽어 줄 것이므로 표나 특수기호 없이 자연스러운 문장으로 작성하세요. 이 규칙은 음성 답변에만 적용되며, 도구에 넣는 값에는 적용되지 않습니다.
 
 [일상 대화]
 회의나 업무와 상관없는 질문에는 회의 기록이나 업무 이야기를 꺼내지 말고, 친근한 대화 상대처럼 자연스럽게 답하세요.
@@ -346,6 +358,13 @@ confirm_send_email 결과의 status가 success인 경우에만 "발송했습니�
 [요약 저장과 검색]
 save_summary는 회의 전체를 요약해 달라는 요청일 때만 사용하세요. 업무 안내, 후속 조치, 마감 정리처럼 일부만 묻는 요청에서는 저장하지 마세요.
 사용자가 회의 내용을 요약해 달라고 하면 요약한 뒤 save_summary로 회의 기록에 저장하세요. 회의명은 회의 기록에서 정하고 지어내지 마세요.
+save_summary를 호출할 때 kim_tasks에 김 대리에게 할당된 업무를 하나씩 넣으세요. 이 내용은 PDF 보고서의 업무 표로 들어갑니다.
+task에는 업무 이름을 짧게 쓰세요.
+confirmed에는 회의에서 김 대리에게 명시적으로 할당된 내용만 쓰세요.
+discussion에는 그 업무와 관련해 논의만 된 아이디어나 제안을 쓰고, 없으면 '없음'이라고 쓰세요.
+deadline에는 [날짜 참고표]에서 찾은 YYYY-MM-DD와 원문 표현을 함께 쓰세요. 예: 2026-11-13 (원문: 다음 주 금요일). 기한이 없으면 '미정', 제안된 기한이면 끝에 '(제안)'을 붙이세요.
+priority에는 1부터 순서대로, 같은 숫자를 중복하지 않고 에이블이 추천하는 우선순위를 쓰세요. 기한, 중요도, 다른 업무에 미치는 영향을 근거로 하세요.
+김 대리에게 할당된 업무가 없으면 kim_tasks는 빈 목록으로 두세요.
 사용자가 회의 요약을 PDF나 보고서로 달라고 하면 회의 전체를 요약해 save_summary로 저장한 뒤, "화면의 보고서 PDF 받기 버튼으로 내려받으실 수 있습니다"라고 안내하세요. 이미 저장된 회의라면 회의 기록 탭에서 받을 수 있다고 안내하세요.
 과거 회의 요약을 요청받으면 search_summaries로 찾아 저장된 내용을 바꾸지 말고 전달하세요. 여러 건이면 날짜와 회의명 목록을 보여 주고 어느 회의인지 되물으세요.
 저장된 요약본을 메일로 보내 달라고 하면 search_summaries로 찾은 뒤 send_email로 초안을 만드세요.
@@ -443,7 +462,7 @@ def ask_able(user_text, history, meeting_text, recipient):
                     result = delete_deadline_tool(arguments)
                 elif item.name == "save_summary":
                     result = save_summary(arguments.get("title", ""), arguments.get("meeting_date", ""),
-                                          arguments.get("summary", ""))
+                                          arguments.get("summary", ""), arguments.get("kim_tasks", []))
                     if result.get("status") == "success":
                         st.session_state.last_summary_id = result["id"]   # 대화 탭에 PDF 버튼 표시용
                     st.session_state.deadline_changed = True   # 회의 기록 탭을 새 값으로 다시 그리기 위함
@@ -750,19 +769,39 @@ def write_summaries(data):
     with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def save_summary(title, meeting_date_str, summary):
+def clean_tasks(kim_tasks):
+    """모델이 넘긴 김 대리 업무 목록을 정리한다 (빈 업무 제거, 우선순위 순 정렬)."""
+    tasks = []
+    for t in kim_tasks or []:
+        if not isinstance(t, dict) or not clean(t.get("task")):
+            continue
+        try:
+            priority = int(t.get("priority"))
+        except (TypeError, ValueError):
+            priority = 99
+        tasks.append({
+            "task": clean(t.get("task")),
+            "confirmed": clean(t.get("confirmed")) or "기록에 없음",
+            "discussion": clean(t.get("discussion")) or "없음",
+            "deadline": clean(t.get("deadline")) or "미정",
+            "priority": priority,
+        })
+    return sorted(tasks, key=lambda x: x["priority"])
+
+def save_summary(title, meeting_date_str, summary, kim_tasks=None):
     """요약본을 저장한다. 같은 회의(회의명 + 날짜)가 있으면 내용만 갱신한다."""
     try:
         data = load_summaries()
         now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+        tasks = clean_tasks(kim_tasks)
         for item in data:
             if item["title"] == title and item["meeting_date"] == meeting_date_str:
-                item["summary"], item["saved_at"] = summary, now
+                item["summary"], item["saved_at"], item["kim_tasks"] = summary, now, tasks
                 write_summaries(data)
                 return {"status": "success", "id": item["id"], "updated": True}
         new_id = max([d["id"] for d in data], default=0) + 1
         data.append({"id": new_id, "title": title, "meeting_date": meeting_date_str,
-                     "summary": summary, "saved_at": now})
+                     "summary": summary, "kim_tasks": tasks, "saved_at": now})
         write_summaries(data)
         return {"status": "success", "id": new_id, "updated": False}
     except Exception as e:
@@ -853,9 +892,27 @@ def split_sections(summary):
         sections.append((title, lines))
     return sections
 
+def build_task_table(tasks, P):
+    """김 대리 할당 업무 표: 업무 | 확정된 업무 내용 | 관련 논의 사항 | 마감일 | 우선순위"""
+    headers = ["업무", "확정된 업무 내용", "관련 논의 사항", "마감일", "우선순위"]
+    rows = [[P(h, "th") for h in headers]]
+    for t in tasks:
+        rows.append([P(t["task"], "cellb"), P(t["confirmed"], "td"), P(t["discussion"], "td"),
+                     P(t["deadline"], "td"), P(f"{t['priority']}순위" if t["priority"] != 99 else "-", "tdc")])
+    table = Table(rows, colWidths=[26 * mm, 46 * mm, 44 * mm, 34 * mm, 20 * mm], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f3a5f")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f4f6fa")]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#b8c4d6")),
+        ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+        ("VALIGN", (0, 1), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    return table
+
 @st.cache_data(show_spinner=False)
-def make_summary_pdf(title, meeting_date_str, summary, saved_at=""):
-    """회의 요약본을 A4 보고서 형식의 PDF(bytes)로 만든다."""
+def make_summary_pdf(title, meeting_date_str, summary, saved_at="", tasks_json="[]"):
+    """회의 요약본을 A4 보고서 형식의 PDF(bytes)로 만든다. tasks_json은 김 대리 업무 표 데이터(JSON 문자열)."""
     font, bold = register_korean_font()
     navy = colors.HexColor("#1f3a5f")
     base = ParagraphStyle("base", fontName=font, fontSize=10.5, leading=17, wordWrap="CJK")
@@ -870,6 +927,12 @@ def make_summary_pdf(title, meeting_date_str, summary, saved_at=""):
         "cellb": ParagraphStyle("cellb", parent=base, fontName=bold, fontSize=10, leading=15),
         "warn": ParagraphStyle("warn", parent=base, fontName=bold, textColor=colors.HexColor("#c0392b")),
         "foot": ParagraphStyle("foot", parent=base, fontSize=8.5, textColor=colors.grey, alignment=TA_CENTER),
+        "th": ParagraphStyle("th", parent=base, fontName=bold, fontSize=9.5, leading=13,
+                             textColor=colors.white, alignment=TA_CENTER),
+        "td": ParagraphStyle("td", parent=base, fontSize=9, leading=13),
+        "tdc": ParagraphStyle("tdc", parent=base, fontSize=9, leading=13, alignment=TA_CENTER),
+        "note": ParagraphStyle("note", parent=base, fontSize=8.5, leading=12, textColor=colors.grey,
+                               spaceBefore=3),
     }
     P = lambda text, s: Paragraph(escape(text).replace("\n", "<br/>"), styles[s])
 
@@ -903,6 +966,16 @@ def make_summary_pdf(title, meeting_date_str, summary, saved_at=""):
             block += [P(("• " if len(lines) > 1 else "") + l, "body") for l in lines] or [P("기록에 없음", "body")]
         story.append(KeepTogether(block))
 
+    # 김 대리 할당 업무 표
+    try:
+        tasks = clean_tasks(json.loads(tasks_json))
+    except ValueError:
+        tasks = []
+    if tasks:
+        number += 1
+        story += [P(f"{number}. 김 대리 할당 업무", "h"), build_task_table(tasks, P),
+                  P("※ 우선순위는 회의에서 정해진 것이 아니라 에이블의 추천입니다.", "note")]
+
     story += [Spacer(1, 8 * mm), HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey),
               P(f"본 보고서는 회의 기록을 바탕으로 AI 개인비서 에이블이 작성했습니다. 출력 일시 {now}", "foot")]
 
@@ -927,7 +1000,8 @@ def pdf_download_button(record, key, label="📄 PDF 보고서 다운로드", co
     """저장된 요약 1건을 PDF 보고서로 내려받는 버튼."""
     try:
         data = make_summary_pdf(record["title"], record["meeting_date"], record["summary"],
-                                record.get("saved_at", ""))
+                                record.get("saved_at", ""),
+                                json.dumps(record.get("kim_tasks", []), ensure_ascii=False))
     except Exception as e:
         container.error(f"PDF 생성 실패: {e}")
         return
@@ -946,6 +1020,12 @@ def render_records_tab(recipient):
     for d in records:
         with st.expander(f"📅 {d['meeting_date']}   {d['title']}"):
             st.text(d["summary"])
+            if d.get("kim_tasks"):
+                st.markdown("**김 대리 할당 업무** (우선순위는 에이블의 추천)")
+                st.dataframe(pd.DataFrame([{
+                    "업무": t["task"], "확정된 업무 내용": t["confirmed"], "관련 논의 사항": t["discussion"],
+                    "마감일": t["deadline"], "우선순위": f"{t['priority']}순위" if t["priority"] != 99 else "-",
+                } for t in d["kim_tasks"]]), hide_index=True, use_container_width=True)
             st.caption(f"저장 시각: {d['saved_at']}")
             c1, c3, c2 = st.columns([1.3, 1.3, 1])
             pdf_download_button(d, key=f"pdf_{d['id']}", container=c3)
