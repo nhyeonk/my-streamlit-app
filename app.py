@@ -268,9 +268,10 @@ summary_tools = [
             "properties": {
                 "title": {"type": "string", "description": "회의명. 예: 'A사 납품 일정 협의'"},
                 "meeting_date": {"type": "string", "description": "회의 날짜 YYYY-MM-DD"},
-                "summary": {"type": "string", "description": "사용자에게 전달한 요약본 전문"}
+                "summary": {"type": "string", "description": "사용자에게 전달한 요약본 전문"},
+                "source_file": {"type": "string", "description": "요약한 회의록의 파일명([회의록 파일] 목록에 있는 이름 그대로). 업로드된 회의록이 아니면 빈 문자열"}
             },
-            "required": ["title", "meeting_date", "summary"],
+            "required": ["title", "meeting_date", "summary", "source_file"],
             "additionalProperties": False
         },
         "strict": True
@@ -443,6 +444,8 @@ def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
         role += (f"\n[발송 대기 중인 이메일 초안]\n받는 사람: {draft['to']}\n"
                  f"제목: {draft['subject']}\n본문: {draft['body']}\n[초안 끝]\n")
     if meeting_text:
+        role += "\n[회의록 파일] save_summary의 source_file에는 요약한 회의록의 파일명을 아래 이름 그대로 쓰세요.\n"
+        role += "\n".join(f"- {m['name']}" for m in meetings) + "\n"
         if len(meetings) > 1:
             role += "\n[회의 날짜] 회의록이 여러 개이며 회의록마다 회의 날짜가 다릅니다.\n"
             for i, m in enumerate(meetings, 1):
@@ -581,7 +584,10 @@ def ask_able(user_text, history, meeting_text, recipient):
                                           arguments.get("summary", ""))
                     if result.get("status") == "success":
                         st.session_state.last_summary_id = result["id"]   # 대화 탭에 PDF 버튼 표시용
-                        st.session_state.clear_uploads = True   # 요약 저장이 끝나면 회의록 업로드 칸을 비움
+                        # 요약이 끝난 회의록은 요청 처리 후 회의록 목록에서 뺌
+                        st.session_state.done_files.append({
+                            "name": clean(arguments.get("source_file")),
+                            "date": clean(arguments.get("meeting_date"))})
                     st.session_state.deadline_changed = True   # 회의 기록 탭을 새 값으로 다시 그리기 위함
                 elif item.name == "search_summaries":
                     result = search_summaries(arguments.get("keyword", ""), arguments.get("date_from", ""),
@@ -1705,8 +1711,9 @@ defaults = {
     "last_summary_id": None, # 대화에서 마지막으로 저장한 회의 요약 (PDF 보고서용)
     "draft_id": 0,
     "recorder_key": 0,       # 녹음 위젯 초기화용
-    "uploader_key": 0,       # 회의록 업로드 칸 초기화용 (값을 바꾸면 업로드 칸이 비워짐)
-    "clear_uploads": False,  # 이번 요청에서 회의 요약을 저장했는지
+    "uploader_key": 0,       # 업로드 칸 초기화용 (파일을 목록으로 옮긴 뒤 칸을 비움)
+    "meeting_store": [],     # 올린 회의록 목록 [{"id", "name", "text", "date"}] (파일별로 뺄 수 있게 직접 보관)
+    "done_files": [],        # 이번 요청에서 요약을 저장한 회의록
     "last_audio_hash": None, # 이미 인식한 녹음 (중복 인식 방지)
     "voice_audio": None,     # 종료된 녹음을 위젯과 별도로 보관
     "voice_error": None,
@@ -1727,26 +1734,43 @@ with st.sidebar:
         st.image(ABLE_HEAD, width=42)
     with title_col:
         st.markdown("### 회의록")
-    meeting_files = st.file_uploader("회의록(txt) 파일", type=["txt"], label_visibility="collapsed",
-                                     accept_multiple_files=True,
-                                     key=f"meeting_uploader_{st.session_state.uploader_key}")
-    if st.session_state.pop("uploads_cleared", False):
-        st.caption("✅ 회의 요약을 저장해서 회의록 업로드 칸을 비웠어요. 저장된 요약은 🗂️ 회의 기록 탭에 있어요.")
-    meetings = []   # [{"name", "text", "date"}] 회의록별 내용과 회의 날짜
-    for i, f in enumerate(meeting_files or []):
-        raw = f.getvalue()
-        try:
-            text = raw.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            text = raw.decode("cp949", errors="ignore")
-        with st.expander(f"📄 {f.name}", expanded=len(meeting_files) == 1):
-            d = st.date_input("📆 회의 날짜", value=guess_meeting_date(text) or today_kst(),
-                              key=f"meeting_date_{i}_{f.name}",
-                              help="'다음 주 금요일' 같은 기한을 날짜로 바꿀 때 기준이 됩니다. "
-                                   "회의록에 날짜가 적혀 있으면 자동으로 채워집니다.")
-            st.text(text[:1500])
-        meetings.append({"name": f.name, "text": text, "date": d})
-    meetings.sort(key=lambda m: m["date"])   # 회의 날짜순
+    # Streamlit 업로드 칸은 파일 하나만 골라 지울 수 없으므로,
+    # 올린 파일은 바로 아래 목록(meeting_store)으로 옮기고 업로드 칸은 비운다.
+    new_files = st.file_uploader("회의록(txt) 파일", type=["txt"], label_visibility="collapsed",
+                                 accept_multiple_files=True,
+                                 key=f"meeting_uploader_{st.session_state.uploader_key}")
+    if new_files:
+        store = st.session_state.meeting_store
+        for f in new_files:
+            raw = f.getvalue()
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = raw.decode("cp949", errors="ignore")
+            fid = hashlib.md5(f"{f.name}|{text}".encode()).hexdigest()[:12]
+            if any(m["id"] == fid for m in store):
+                continue   # 같은 파일을 다시 올리면 무시
+            store[:] = [m for m in store if m["name"] != f.name]   # 같은 이름이면 새 파일로 교체
+            store.append({"id": fid, "name": f.name, "text": text,
+                          "date": guess_meeting_date(text) or today_kst()})
+        st.session_state.uploader_key += 1
+        st.rerun()
+
+    removed = st.session_state.pop("removed_notice", None)
+    if removed:
+        st.caption(f"✅ 요약을 저장한 회의록을 목록에서 뺐어요: {', '.join(removed)}")
+
+    store = st.session_state.meeting_store
+    for m in list(store):
+        with st.expander(f"📄 {m['name']}", expanded=len(store) == 1):
+            m["date"] = st.date_input("📆 회의 날짜", value=m["date"], key=f"meeting_date_{m['id']}",
+                                      help="'다음 주 금요일' 같은 기한을 날짜로 바꿀 때 기준이 됩니다. "
+                                           "회의록에 날짜가 적혀 있으면 자동으로 채워집니다.")
+            st.text(m["text"][:1500])
+            if st.button("🗑️ 이 회의록 빼기", key=f"meeting_remove_{m['id']}", use_container_width=True):
+                store.remove(m)
+                st.rerun()
+    meetings = sorted(store, key=lambda m: m["date"])   # 회의 날짜순
 
     # 기존 코드와 호환: 회의록이 하나면 그대로, 여러 개면 구분선을 넣어 하나로 이어 붙임
     if len(meetings) == 1:
@@ -2000,12 +2024,21 @@ with chat_area:
             st.error(f"오류가 발생했습니다: {e}")
 
 # 에이블이 달력이나 회의 기록을 바꿨다면 해당 탭이 새 값으로 보이도록 화면을 한 번 다시 그림 (대화는 이미 저장됨)
-if st.session_state.clear_uploads:
-    # 요약 저장까지 끝난 요청이면 회의록 업로드 칸을 비움 (위젯 key를 바꾸면 새 빈 업로더가 됨)
-    st.session_state.clear_uploads = False
-    st.session_state.uploader_key += 1
-    st.session_state.uploads_cleared = True
-    st.session_state.deadline_changed = True
+if st.session_state.done_files:
+    store = st.session_state.meeting_store
+    removed = []
+    for done in st.session_state.done_files:
+        target = [m for m in store if m["name"] == done["name"]]
+        if not target:   # 파일명이 정확히 안 맞으면 회의 날짜가 같은 회의록이 하나뿐일 때만 그것으로 판단
+            same_day = [m for m in store if m["date"].isoformat() == done["date"]]
+            target = same_day if len(same_day) == 1 else []
+        for m in target:
+            store.remove(m)
+            removed.append(m["name"])
+    st.session_state.done_files = []
+    if removed:
+        st.session_state.removed_notice = removed
+        st.session_state.deadline_changed = True
 
 if st.session_state.deadline_changed:
     st.session_state.deadline_changed = False
