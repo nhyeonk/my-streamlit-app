@@ -753,12 +753,48 @@ def make_ics(deadlines):
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines).encode("utf-8")
 
+def _task_match_key(name):
+    """회의록 추출 결과 간 띄어쓰기·문장부호 차이를 줄여 업무명을 비교한다."""
+    return re.sub(r"[^0-9a-z가-힣]", "", clean(name).lower())
+
+
+def sync_priority_deadlines():
+    """마감 달력의 확정 데이터를 우선순위에 반영하고 D-day/4분면을 다시 계산한다.
+
+    중요도·rush·근거는 기존 AI 분석 결과를 보존한다.
+    업무명 일치가 명확한 경우에만 동기화하여 엉뚱한 업무의 날짜 변경을 방지한다.
+    """
+    priorities = st.session_state.get("priority_items", [])
+    deadlines = st.session_state.get("deadlines", [])
+    if not priorities:
+        return
+
+    by_key = {}
+    for deadline in deadlines:
+        key = _task_match_key(deadline["task"])
+        if key:
+            by_key.setdefault(key, []).append(deadline)
+
+    updated = []
+    for task in priorities:
+        item = dict(task)
+        key = _task_match_key(item["task"])
+        matches = by_key.get(key, [])
+        if len(matches) == 1:
+            item["due"] = matches[0]["due"]
+            item["due_text"] = matches[0].get("due_text", "")
+        updated.append(item)
+
+    st.session_state.priority_items = classify_tasks(updated, today_kst())
+
+
 def set_deadlines(items):
     """도구로 바뀐 마감 일정을 저장하고 달력 탭의 편집기를 새 값으로 다시 그리게 한다."""
     st.session_state.deadline_items = items
     st.session_state.deadlines = items
     st.session_state.deadline_version += 1
     st.session_state.deadline_changed = True
+    sync_priority_deadlines()
 
 def find_deadlines(keyword, items):
     key = clean(keyword).lower()
@@ -1436,6 +1472,13 @@ def render_deadline_tab():
             "due_text": clean(row.get("원문 표현")),
         })
 
+    # 편집기에서 직접 수정·추가·삭제한 내용도 공통 데이터에 확정한다.
+    # 단순 재실행 시에는 변경하지 않아 입력 중인 편집기를 초기화하지 않는다.
+    if deadlines != st.session_state.deadline_items:
+        st.session_state.deadline_items = deadlines
+        st.session_state.deadlines = deadlines
+        sync_priority_deadlines()
+
     dated = [d for d in deadlines if d["due"]]
     undated = [d for d in deadlines if not d["due"]]
     today = today_kst()
@@ -1660,7 +1703,9 @@ if meeting_text:
         with st.spinner("에이블이 업무 우선순위를 정리하는 중..."):
             try:
                 items = extract_tasks(meeting_text, meeting_date)
-                st.session_state.priority_items = classify_tasks(items, meeting_date)
+                st.session_state.priority_items = classify_tasks(items, today_kst())
+                # 달력에서 수정한 마감일을 우선순위에 우선 반영한다.
+                sync_priority_deadlines()
                 # 회의록을 새로 올리면 에이블이 먼저 말을 건넴 (챗봇다운 첫인사)
                 add_message(role="assistant", content=briefing_text(st.session_state.priority_items))
             except Exception as e:
