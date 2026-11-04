@@ -432,15 +432,32 @@ def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
 7. 액션 아이템이 없으면 표 대신 '기록에 없음'이라고 쓰세요.
 """
     role += f"\n오늘 날짜는 {today_kst().isoformat()} 입니다.\n"
-    role += f"회의 날짜(사이드바에서 선택)는 {st.session_state.get('meeting_date_str', today_kst().isoformat())} 입니다. save_summary의 meeting_date에는 이 날짜를 쓰세요.\n"
+    meetings = st.session_state.get("meetings") or []
+    if len(meetings) > 1:
+        role += "회의 날짜는 회의록마다 다릅니다(아래 [회의 날짜] 참고). save_summary의 meeting_date에는 요약한 회의록의 날짜를 쓰세요.\n"
+    else:
+        role += f"회의 날짜(사이드바에서 선택)는 {st.session_state.get('meeting_date_str', today_kst().isoformat())} 입니다. save_summary의 meeting_date에는 이 날짜를 쓰세요.\n"
     if recipient:
         role += f"\n사용자가 따로 말하지 않으면 이메일 수신자는 {recipient} 입니다.\n"
     if draft:
         role += (f"\n[발송 대기 중인 이메일 초안]\n받는 사람: {draft['to']}\n"
                  f"제목: {draft['subject']}\n본문: {draft['body']}\n[초안 끝]\n")
     if meeting_text:
-        base = parse_date(st.session_state.get("meeting_date_str")) or today_kst()
-        role += f"\n[회의 날짜]\n{fmt_day(base)}\n\n[날짜 참고표] 회의 날짜 기준\n{build_date_guide(base)}\n"
+        if len(meetings) > 1:
+            role += "\n[회의 날짜] 회의록이 여러 개이며 회의록마다 회의 날짜가 다릅니다.\n"
+            for i, m in enumerate(meetings, 1):
+                role += (f"\n- 회의록 {i} ({m['name']}): {fmt_day(m['date'])}\n"
+                         f"[날짜 참고표] 회의록 {i} 기준\n{build_date_guide(m['date'])}\n")
+            role += """
+[여러 회의록 처리 규칙]
+1. 회의록은 '=== 회의록 N: 파일명 (회의 날짜 ...) ===' 줄로 구분됩니다. 답할 때 어느 회의록의 내용인지 밝히세요.
+2. 회의록 속 기한 표현은 그 회의록의 회의 날짜 기준 참고표에서 찾아 쓰세요.
+3. 회의 전체 요약을 요청받으면 회의록마다 따로 요약(정해진 형식)하고 각각 save_summary로 저장하세요. 특정 회의만 말하면 그 회의만 요약하세요.
+4. 같은 업무가 여러 회의록에 나오면 가장 최근 회의 내용을 기준으로 하고, 달라진 점이 있으면 알려 주세요.
+"""
+        else:
+            base = parse_date(st.session_state.get("meeting_date_str")) or today_kst()
+            role += f"\n[회의 날짜]\n{fmt_day(base)}\n\n[날짜 참고표] 회의 날짜 기준\n{build_date_guide(base)}\n"
         role += f"\n[회의 기록 시작]\n{meeting_text}\n[회의 기록 끝]\n"
     else:
         role += "\n아직 회의 기록이 업로드되지 않았습니다. 회의 관련 요청이면 업로드를 안내하세요.\n"
@@ -526,7 +543,7 @@ def ask_able(user_text, history, meeting_text, recipient):
     # 발송/취소 도구는 요청 시작 시점에 초안이 있을 때만 제공 (같은 요청에서 만든 초안을 바로 발송하지 못하게 함)
     available_tools = tools + deadline_tools + summary_tools + (confirm_tools if pending else [])
 
-    for _ in range(5):  # 도구 호출은 최대 5회까지 (요약 저장, 일정 등록 등이 이어질 수 있음)
+    for _ in range(8):  # 도구 호출은 최대 8회까지 (회의록별 요약 저장, 일정 등록 등이 이어질 수 있음)
         instructions = build_instructions(meeting_text, recipient, current_draft(),
                                           st.session_state.deadlines)
         response = client.responses.create(
@@ -908,6 +925,29 @@ QUADRANTS = {
     (True, False):  {"order": 3, "icon": "⏱️", "title": "긴급하지만 중요하지 않은 일", "action": "업무 위임 또는 간소화"},
     (False, False): {"order": 4, "icon": "🧹", "title": "긴급하지도 중요하지도 않은 일", "action": "업무 제거 또는 최소화"},
 }
+
+DATE_IN_TEXT = re.compile(r"(20\d{2})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})")
+
+def guess_meeting_date(text):
+    """회의록 앞부분에 적힌 날짜(2026-11-04, 2026.11.04, 2026년 11월 4일)를 찾아 기본값으로 쓴다."""
+    m = DATE_IN_TEXT.search(text[:500])
+    if m:
+        try:
+            return date(int(m[1]), int(m[2]), int(m[3]))
+        except ValueError:
+            pass
+    return None
+
+def extract_tasks_multi(meetings):
+    """회의록마다 그 회의 날짜를 기준으로 업무를 추출해 하나로 합친다 (회의록끼리는 동시에 분석)."""
+    with ThreadPoolExecutor(max_workers=min(4, len(meetings))) as pool:
+        results = list(pool.map(lambda m: extract_tasks(m["text"], m["date"]), meetings))
+    merged = {}
+    # 오래된 회의부터 넣어서, 같은 업무명이면 최근 회의 내용으로 덮어씀
+    for m, items in sorted(zip(meetings, results), key=lambda x: x[0]["date"]):
+        for item in items:
+            merged[item["task"]] = item
+    return list(merged.values())
 
 def extract_tasks(meeting_text, base_date):
     """한 번의 LLM 분석으로 두 탭의 공통 업무와 중요도를 추출한다."""
@@ -1683,19 +1723,34 @@ with st.sidebar:
         st.image(ABLE_HEAD, width=42)
     with title_col:
         st.markdown("### 회의록")
-    meeting_file = st.file_uploader("회의록(txt) 파일", type=["txt"], label_visibility="collapsed")
-    meeting_text = ""
-    if meeting_file is not None:
-        raw = meeting_file.getvalue()
+    meeting_files = st.file_uploader("회의록(txt) 파일", type=["txt"], label_visibility="collapsed",
+                                     accept_multiple_files=True)
+    meetings = []   # [{"name", "text", "date"}] 회의록별 내용과 회의 날짜
+    for i, f in enumerate(meeting_files or []):
+        raw = f.getvalue()
         try:
-            meeting_text = raw.decode("utf-8-sig")
+            text = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
-            meeting_text = raw.decode("cp949", errors="ignore")
-        with st.expander(f"{meeting_file.name} 미리보기"):
-            st.text(meeting_text[:1500])
-    meeting_date = st.date_input("📆 회의 날짜", value=today_kst(),
-                                 help="'다음 주 금요일' 같은 기한을 날짜로 바꿀 때 기준이 됩니다.")
+            text = raw.decode("cp949", errors="ignore")
+        with st.expander(f"📄 {f.name}", expanded=len(meeting_files) == 1):
+            d = st.date_input("📆 회의 날짜", value=guess_meeting_date(text) or today_kst(),
+                              key=f"meeting_date_{i}_{f.name}",
+                              help="'다음 주 금요일' 같은 기한을 날짜로 바꿀 때 기준이 됩니다. "
+                                   "회의록에 날짜가 적혀 있으면 자동으로 채워집니다.")
+            st.text(text[:1500])
+        meetings.append({"name": f.name, "text": text, "date": d})
+    meetings.sort(key=lambda m: m["date"])   # 회의 날짜순
+
+    # 기존 코드와 호환: 회의록이 하나면 그대로, 여러 개면 구분선을 넣어 하나로 이어 붙임
+    if len(meetings) == 1:
+        meeting_text = meetings[0]["text"]
+    else:
+        meeting_text = "\n\n".join(
+            f"=== 회의록 {i}: {m['name']} (회의 날짜 {fmt_day(m['date'])}) ===\n{m['text']}"
+            for i, m in enumerate(meetings, 1))
+    meeting_date = meetings[-1]["date"] if meetings else today_kst()   # 가장 최근 회의 날짜
     st.session_state.meeting_date_str = meeting_date.isoformat()
+    st.session_state.meetings = [{"name": m["name"], "date": m["date"]} for m in meetings]
 
     st.subheader("✉️ 기본 수신자")
     recipient = st.text_input("기본 수신자 주소", value=os.getenv("GMAIL_ADDRESS", ""),
@@ -1727,7 +1782,12 @@ with head_left:
 with head_right:
     st.write("")
     badges = []
-    badges.append(f":green-badge[📄 {meeting_file.name}]" if meeting_file else ":orange-badge[📄 회의록 없음]")
+    if len(meetings) == 1:
+        badges.append(f":green-badge[📄 {meetings[0]['name']}]")
+    elif meetings:
+        badges.append(f":green-badge[📄 회의록 {len(meetings)}개]")
+    else:
+        badges.append(":orange-badge[📄 회의록 없음]")
     badges.append(f":blue-badge[✉️ {recipient}]" if recipient else ":orange-badge[✉️ 수신자 없음]")
     st.markdown(" ".join(badges))
 
@@ -1808,11 +1868,11 @@ with tab_rec:
 # 마감 달력 탭: 회의록이 바뀌면 마감 일정을 다시 추출 (에이블 답변보다 먼저 실행해 목록을 반영)
 # ---------------------------------------------------------------
 if meeting_text:
-    priority_key = hashlib.md5(f"{meeting_text}|{meeting_date}".encode()).hexdigest()
+    priority_key = hashlib.md5("|".join(f"{m['text']}|{m['date']}" for m in meetings).encode()).hexdigest()
     if st.session_state.priority_key != priority_key or st.session_state.deadline_key is None:
         with st.spinner("에이블이 업무 우선순위를 정리하는 중..."):
             try:
-                items = extract_tasks(meeting_text, meeting_date)
+                items = extract_tasks_multi(meetings)
                 set_deadlines(items)
                 st.session_state.deadline_changed = False
                 st.session_state.deadline_key = priority_key
@@ -1835,8 +1895,11 @@ with tab_cal:
         st.info("왼쪽에서 회의록(txt)을 업로드하면 마감 일정을 자동으로 찾아 달력에 표시합니다. "
                 "에이블에게 \"다음 주 금요일에 ○○ 마감 표시해줘\"라고 말해도 됩니다.")
     elif meeting_text:
-        deadline_key = hashlib.md5(f"{meeting_text}|{meeting_date}".encode()).hexdigest()
-        st.caption(f"회의 날짜 {meeting_date.isoformat()} 기준으로 상대적인 기한을 계산했습니다.")
+        if len(meetings) > 1:
+            st.caption("회의록 " + ", ".join(f"{m['name']}({m['date'].isoformat()})" for m in meetings)
+                       + " 각각의 회의 날짜 기준으로 상대적인 기한을 계산했습니다.")
+        else:
+            st.caption(f"회의 날짜 {meeting_date.isoformat()} 기준으로 상대적인 기한을 계산했습니다.")
     if meeting_text or st.session_state.deadline_items:
         st.session_state.deadlines = render_deadline_tab()
 
@@ -1869,7 +1932,7 @@ with chat_area:
     if not old and not pending_text:
         with st.chat_message("assistant", avatar=ROBOT_AVATAR):
             st.markdown("안녕하세요, 김 대리님! 개인비서 **에이블**입니다. 👋")
-            if meeting_file is None:
+            if not meetings:
                 st.warning("먼저 왼쪽에서 회의록(txt)을 업로드해 주세요.")
             st.markdown("- 아래에서 **음성 녹음** 또는 **채팅**으로 요청하세요.\n"
                         "- 대화창 아래의 **자주 쓰는 요청** 버튼도 사용할 수 있어요.")
