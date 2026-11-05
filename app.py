@@ -46,7 +46,7 @@ PDF_MISSING_MSG = "PDF 기능을 쓰려면 requirements.txt에 reportlab, pypdfi
 # ---------------------------------------------------------------
 # 페이지 설정
 # ---------------------------------------------------------------
-st.set_page_config(page_title="AI 개인비서 에비", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="AI 개인비서 에비(AVI)", page_icon="🤖", layout="wide")
 
 # 브라우저 자동 번역 끄기 (번역기가 화면을 바꾸면 글자가 이상해지고 removeChild 오류가 남)
 components.html(
@@ -420,7 +420,7 @@ def finish_draft(action, user_text):
 def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
     role = """
 [역할]
-당신은 김 대리의 음성인식 AI 개인비서 '에비'입니다.
+당신은 김 대리의 음성인식 AI 개인비서 '에비(AVI)'입니다.
 김 대리가 말이나 글로 요청하면 업무를 처리하고 답합니다.
 '김대리'와 '김 대리'는 같은 사람입니다.
 
@@ -736,7 +736,7 @@ def name_line(text):
 
 def render_message(m, show_text=True, autoplay=False):
     if m["kind"] == "mail":
-        # 에비 답변 안의 '요약 저장' 초록 바와 같은 너비가 되도록 채팅 말풍선 안에 표시
+        # 에비 답변 안의 '요약 저장' 초록 바와 같은 너비가 되도록 채팅 말풍선 안에 표시 (아바타는 투명)
         with st.chat_message("assistant", avatar=BLANK_AVATAR):
             if m["status"] == "success":
                 att = f" (📎 PDF {m['attached']}개 첨부)" if m.get("attached") else ""
@@ -1505,7 +1505,7 @@ def make_summary_pdf(title, meeting_date_str, summary, saved_at=""):
     story = [P("회의 결과 보고서", "title"), P(title or "회의 요약", "sub"), Spacer(1, 6 * mm)]
 
     info = [["회의명", title or "-", "회의 날짜", meeting_date_str or "-"],
-            ["작성자", "김 대리 (AI 개인비서 에비 작성)", "작성 일시", saved_at or now]]
+            ["작성자", "김 대리 (AI 개인비서 에비(AVI) 작성)", "작성 일시", saved_at or now]]
     story.append(grid(Table([[P(c, "cellb" if i % 2 == 0 else "cell") for i, c in enumerate(r)] for r in info],
                             colWidths=[22 * mm, 68 * mm, 22 * mm, 58 * mm]), header_cols=[0, 2]))
     story += [Spacer(1, 4 * mm), HRFlowable(width="100%", thickness=1, color=navy), Spacer(1, 2 * mm)]
@@ -1540,7 +1540,7 @@ def make_summary_pdf(title, meeting_date_str, summary, saved_at=""):
         story += [pending_head, P("기록에 없음", "text")]
 
     story += [Spacer(1, 8 * mm), HRFlowable(width="100%", thickness=0.5, color=colors.lightgrey),
-              P(f"본 보고서는 회의 기록을 바탕으로 AI 개인비서 에비가 작성했습니다. 출력 일시 {now}", "foot")]
+              P(f"본 보고서는 회의 기록을 바탕으로 AI 개인비서 에비(AVI)가 작성했습니다. 출력 일시 {now}", "foot")]
 
     def page_number(canvas, doc):
         canvas.saveState()
@@ -1964,7 +1964,7 @@ def render_deadline_tab():
 # ---------------------------------------------------------------
 defaults = {
     "deadline_items": [],    # 회의록에서 추출한 마감 일정 (편집기 초기값)
-    "analyzed_key": None,    # 업무 추출을 마친 회의록/날짜 식별값 (업로드만으로는 추출하지 않음)
+    "analyzed_key": None,    # 업무 추출을 마친 회의록/날짜 식별값 (회의록을 올리면 자동으로 한 번 추출)
     "analyze_failed_key": None,  # 요청으로 자동 추출하다 실패한 회의록 (같은 회의록에서 반복 실패 방지)
     "deadline_version": 0,   # 마감 일정 편집기 초기화용
     "deadline_changed": False,  # 이번 요청에서 도구가 마감 일정을 바꿨는지
@@ -2078,7 +2078,7 @@ with st.sidebar:
 # ---------------------------------------------------------------
 head_left, head_right = st.columns([3, 2])
 with head_left:
-    st.markdown("## 🤖 AI 개인비서 에비")
+    st.markdown("## AI 개인비서 에비(AVI)")
 with head_right:
     st.write("")
     badges = []
@@ -2181,7 +2181,7 @@ with tab_rec:
     render_records_tab(recipient)
 
 # ---------------------------------------------------------------
-# 마감 달력 탭: 회의록이 바뀌면 마감 일정을 다시 추출 (에비 답변보다 먼저 실행해 목록을 반영)
+# 업무 추출: 회의록을 올리면 바로 실행해 우선순위·마감 달력에 표시 (에비 답변보다 먼저 실행해 목록을 반영)
 # ---------------------------------------------------------------
 analyzed = False
 if meeting_text:
@@ -2195,14 +2195,15 @@ if meeting_text:
         st.session_state.analyzed_key = None
         st.session_state.analyze_failed_key = None
 
-    # 실행 조건: ① 사용자가 에비에게 요청(채팅·음성·자주 쓰는 요청)을 보냈는데 아직 추출 전
-    #            ② 마감 달력의 '업무 다시 추출' 버튼
-    # 업로드만으로는 아무것도 실행하지 않는다 (파일만 첨부된 상태로 대기)
+    # 실행 조건: ① 회의록을 올리면(또는 회의록·회의 날짜가 바뀌면) 바로 한 번 자동 실행
+    #               → 대화 탭에서 요청하지 않아도 우선순위·마감 달력에 바로 표시
+    #            ② 실패했을 때 '업무 다시 추출' 버튼
+    # 같은 회의록은 한 번만 분석하고, 실패하면 자동으로 반복하지 않음 (API 호출 낭비 방지)
     reason = st.session_state.pop("analyze_request", None)
-    if (reason is None and st.session_state.get("chip_request")
+    if (reason is None
             and st.session_state.analyzed_key != priority_key
             and st.session_state.analyze_failed_key != priority_key):
-        reason = "command"
+        reason = "upload"
     if reason:
         with st.spinner("에비가 업무를 정리하는 중..."):
             try:
@@ -2223,13 +2224,19 @@ else:
 
 set_deadlines(st.session_state.deadline_items, refresh_editor=False)
 
+def request_analyze():
+    """'업무 다시 추출' 버튼: 다음 실행에서 회의록 업무를 다시 정리한다."""
+    st.session_state.analyze_request = "retry"
+    st.session_state.analyze_failed_key = None
+
 with tab_cal:
     if not meeting_text and not st.session_state.deadline_items:
         st.session_state.deadlines = []
-        st.info("왼쪽에서 회의록(txt)을 업로드하고 에비에게 요청하면 마감 일정을 찾아 달력에 표시합니다. "
+        st.info("왼쪽에서 회의록(txt)을 업로드하면 마감 일정을 찾아 달력에 바로 표시합니다. "
                 "에비에게 \"다음 주 금요일에 ○○ 마감 표시해줘\"라고 말해도 됩니다.")
     elif meeting_text and not analyzed:
-        st.info("회의록이 첨부되어 있어요. 에비에게 요청하면 마감 일정을 찾아 달력에 표시합니다.")
+        st.warning("회의록에서 마감 일정을 정리하지 못했어요. 아래 버튼을 눌러 다시 시도해 주세요.")
+        st.button("🔄 업무 다시 추출", key="retry_analyze_cal", on_click=request_analyze)
     elif meeting_text:
         if len(meetings) > 1:
             st.caption("회의록 " + ", ".join(f"{m['name']}({m['date'].isoformat()})" for m in meetings)
@@ -2246,11 +2253,12 @@ with tab_pri:
     if st.session_state.priority_items:
         render_priority_tab(st.session_state.priority_items)
     elif meeting_text and not analyzed:
-        st.info("회의록이 첨부되어 있어요. 에비에게 요청하면 김 대리님 업무를 긴급·중요 기준으로 나눠 보여 드려요.")
+        st.warning("회의록에서 업무를 정리하지 못했어요. 아래 버튼을 눌러 다시 시도해 주세요.")
+        st.button("🔄 업무 다시 추출", key="retry_analyze_pri", on_click=request_analyze)
     elif meeting_text:
         st.info("이번 회의록에서 김 대리님께 배정된 업무를 찾지 못했어요.")
     else:
-        st.info("왼쪽에서 회의록(txt)을 업로드하고 에비에게 요청하면 김 대리님 업무를 긴급·중요 기준으로 나눠 보여 드려요.")
+        st.info("왼쪽에서 회의록(txt)을 업로드하면 김 대리님 업무를 긴급·중요 기준으로 나눠 바로 보여 드려요.")
 
 # ---------------------------------------------------------------
 # 이번 실행에서 처리할 요청 결정: 버튼 요청 > 텍스트 > 새 녹음
@@ -2275,7 +2283,7 @@ with chat_area:
             # 첫 인사: 기본 글자(16px)보다 2px 큰 18px, 인사와 질문 사이 간격은 좁게 (1.0rem)
             st.markdown(
                 "<div style='font-size:17px;line-height:1.6;'>"
-                "<div style='margin:0 0 1.0rem;'>안녕하세요, 김 대리님! 개인비서 <b>에비</b>입니다. 👋</div>"
+                "<div style='margin:0 0 1.0rem;'>안녕하세요, 김 대리님! 개인비서 <b>에비(AVI)</b>입니다. 👋</div>"
                 "<div style='margin:0 0 0.9rem;font-weight:700;'>어떤 업무를 도와드릴까요?</div>"
                 "<ul style='margin:0;padding-left:1.4rem;'>"
                 "<li style='margin-bottom:0.25rem;'>아래에서 <b>음성 녹음</b> 또는 <b>채팅</b>으로 요청하세요.</li>"
