@@ -1,3 +1,5 @@
+%%writefile app.py
+
 import os
 import json
 import ssl
@@ -1792,13 +1794,17 @@ with head_right:
 # 최신 버전은 공식 상태 제어를 사용하고, 구버전은 아래의 브라우저 이동을 사용한다.
 supports_tab_state = {"key", "on_change"}.issubset(inspect.signature(st.tabs).parameters)
 go_to_chat = st.session_state.pop("chat_navigation", False)
-if go_to_chat and supports_tab_state:
+if go_to_chat and supports_tab_state and st.session_state.get("main_tabs") != "💬 대화":
+    # 다른 탭에서 요청한 경우: 탭만 먼저 바꾸고 바로 다시 그린다.
+    # (요청은 chip_request에 남아 있으므로 다음 실행에서 대화 탭이 열린 상태로 처리됨)
     st.session_state.main_tabs = "💬 대화"
+    st.rerun()
 tab_options = {"key": "main_tabs", "on_change": "rerun"} if supports_tab_state else {}
 tab_chat, tab_pri, tab_rec, tab_cal = st.tabs(
     ["💬 대화", "🎯 우선순위", "🗂️ 회의 기록", "📅 마감 달력"], **tab_options)
-if go_to_chat:
-    # 상태 제어가 안 되는 버전이거나 반영이 늦을 때를 대비해 브라우저에서도 대화 탭을 누른다
+if go_to_chat and not supports_tab_state:
+    # 탭 상태 제어가 안 되는 구버전에서만 브라우저에서 대화 탭을 누른다.
+    # 최신 버전에서 누르면 탭의 on_change="rerun"이 실행 중인 답변 생성을 끊어 버린다.
     switch_to_chat_tab()
 
 with tab_chat:
@@ -1950,10 +1956,14 @@ with tab_pri:
 # 이번 실행에서 처리할 요청 결정: 버튼 요청 > 텍스트 > 새 녹음
 # ---------------------------------------------------------------
 pending_text, pending_src = None, "text"
-chip = st.session_state.pop("chip_request", None)
+# 답변이 저장될 때까지 지우지 않는다 → 처리 도중 화면이 다시 실행돼도 요청이 사라지지 않음
+chip = st.session_state.get("chip_request")
 if chip:
     pending_text = chip
-    st.session_state.pop("go_chat", None)     # 대화 탭 이동은 탭을 만들 때 처리함
+
+def finish_request():
+    st.session_state.pop("chip_request", None)
+    st.session_state.chip_user_added = False
 
 # ---------------------------------------------------------------
 # 대화 영역: 기존 대화 출력 + 새 요청 처리
@@ -1984,12 +1994,18 @@ with chat_area:
     if pending_text:
         src = pending_src
         user_text = pending_text
+        # 이전 실행에서 사용자 메시지까지 넣고 끊겼다면 다시 넣지 않고 답변만 이어서 만든다
+        resumed = st.session_state.get("chip_user_added", False)
         try:
             # LLM에 보낼 대화 히스토리: 새 메시지를 추가하기 전의 text 메시지 최근 N개
-            history = [{"role": m["role"], "content": m["content"]}
-                       for m in st.session_state.messages if m["kind"] == "text"][-MAX_HISTORY:]
+            texts = [m for m in st.session_state.messages if m["kind"] == "text"]
+            if resumed and texts and texts[-1]["role"] == "user":
+                texts = texts[:-1]          # 이미 화면에 있는 이번 요청 메시지는 제외
+            history = [{"role": m["role"], "content": m["content"]} for m in texts][-MAX_HISTORY:]
 
-            render_message(add_message(role="user", content=user_text, src=src))
+            if not resumed:
+                render_message(add_message(role="user", content=user_text, src=src))
+                st.session_state.chip_user_added = True
             n_before = len(st.session_state.messages)
 
             with st.spinner("답변 준비 중..."):
@@ -2015,6 +2031,7 @@ with chat_area:
             for m in st.session_state.messages[n_before:]:
                 render_message(m)
             answer_msg = add_message(role="assistant", content=answer, audio=audio)
+            finish_request()                # 답변까지 저장됐으므로 요청을 끝냄
             prune_audio()
             render_message(answer_msg, show_text or not audio, autoplay=True)
             if src == "voice":
@@ -2024,6 +2041,7 @@ with chat_area:
                 st.session_state.last_audio_hash = None
                 st.session_state.recorder_key += 1
         except Exception as e:
+            finish_request()                # 오류가 나도 같은 요청을 계속 반복하지 않음
             st.error(f"오류가 발생했습니다: {e}")
 
 # 에이블이 달력이나 회의 기록을 바꿨다면 해당 탭이 새 값으로 보이도록 화면을 한 번 다시 그림 (대화는 이미 저장됨)
