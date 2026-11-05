@@ -1425,6 +1425,11 @@ def show_pdf_preview(record):
             if len(pages) > 1:
                 st.caption(f"{no} / {len(pages)} 페이지")
 
+def toggle_summary_preview(record_id):
+    """대화 탭의 '요약 보고서 미리보기' 버튼: 누를 때마다 열고 닫는다."""
+    current = st.session_state.get("preview_summary_id")
+    st.session_state.preview_summary_id = None if current == record_id else record_id
+
 def render_records_tab(recipient):
     """회의 기록 탭: 저장된 요약을 검색하고, 메일로 보내거나 삭제한다."""
     keyword = st.text_input("🔎 회의 기록 검색", placeholder="회의명이나 내용 키워드")
@@ -2034,10 +2039,15 @@ if st.session_state.last_summary_id is not None:
     record = next((x for x in load_summaries() if x["id"] == st.session_state.last_summary_id), None)
     if record:
         with report_area:
-            c1, c2 = st.columns([3, 1.3])
-            c1.success(f"📝 회의 요약을 저장했습니다: {record['meeting_date']} {record['title']}")
-            pdf_download_button(record, key="pdf_latest", container=c2)
-            with st.expander("👁️ 요약 보고서(PDF) 미리보기"):
+            # 저장 완료 안내는 전체 너비로, 그 아래에 버튼 2개를 나란히 둔다
+            st.success(f"📝 회의 요약을 저장했습니다: {record['meeting_date']} {record['title']}")
+            previewing = st.session_state.get("preview_summary_id") == record["id"]
+            c1, c2 = st.columns(2)
+            pdf_download_button(record, key="pdf_latest", container=c1)
+            c2.button("🙈 요약 보고서 닫기" if previewing else "👁️ 요약 보고서 미리보기",
+                      key="preview_latest", use_container_width=True,
+                      on_click=toggle_summary_preview, args=(record["id"],))
+            if previewing:
                 show_pdf_preview(record)
 
 
