@@ -11,7 +11,6 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication
 from email.utils import parseaddr
 
 import pandas as pd
@@ -146,8 +145,7 @@ def markdown_to_email_html(body):
     return ('<div style="font-family:\'Malgun Gothic\',sans-serif;font-size:14px;line-height:1.6;">'
             + "".join(out) + "</div>")
 
-def send_email(to, subject, body, attachments=None):
-    """메일 발송. attachments: [(파일명, bytes), ...] (PDF 첨부)."""
+def send_email(to, subject, body):
     sender = os.getenv("GMAIL_ADDRESS", "").strip()
     password = os.getenv("GMAIL_APP_PASSWORD", "").replace(" ", "")
     if not sender or not password:
@@ -157,26 +155,15 @@ def send_email(to, subject, body, attachments=None):
     if not isinstance(subject, str) or any(c in subject for c in "\r\n"):
         return {"status": "failed", "error": "올바른 메일 제목이 필요합니다."}
     try:
-        text_part = MIMEMultipart("alternative")
-        text_part.attach(MIMEText(body, "plain", "utf-8"))                          # HTML을 못 여는 메일앱용
-        text_part.attach(MIMEText(markdown_to_email_html(body), "html", "utf-8"))  # 일반 메일앱은 이걸 표시
-        if attachments:
-            # 본문(텍스트/HTML) + 첨부 파일을 함께 담는 구조
-            msg = MIMEMultipart("mixed")
-            msg.attach(text_part)
-            for name, data in attachments:
-                part = MIMEApplication(data, _subtype="pdf")
-                # 한글 파일명이 깨지지 않도록 UTF-8로 인코딩
-                part.add_header("Content-Disposition", "attachment", filename=("utf-8", "", name))
-                msg.attach(part)
-        else:
-            msg = text_part
+        msg = MIMEMultipart("alternative")
         msg["Subject"], msg["From"], msg["To"] = subject, sender, to
+        msg.attach(MIMEText(body, "plain", "utf-8"))                          # HTML을 못 여는 메일앱용
+        msg.attach(MIMEText(markdown_to_email_html(body), "html", "utf-8"))  # 일반 메일앱은 이걸 표시
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
             s.starttls(context=ssl.create_default_context())
             s.login(sender, password)
             s.send_message(msg)
-        return {"status": "success", "to": to, "attachments": [n for n, _ in attachments or []]}
+        return {"status": "success", "to": to}
     except Exception as e:
         return {"status": "failed", "error": str(e)}
 
@@ -190,13 +177,9 @@ tools = [{
         "properties": {
             "to": {"type": "string", "description": "이메일 수신자. 예: 'test@gmail.com'"},
             "subject": {"type": "string", "description": "이메일 제목"},
-            "body": {"type": "string", "description": "이메일 본문"},
-            "attach_summary_ids": {
-                "type": "array", "items": {"type": "integer"},
-                "description": "PDF 보고서로 첨부할 회의 요약 id 목록([저장된 회의 요약 목록]의 id). 첨부하지 않으면 빈 배열"
-            }
+            "body": {"type": "string", "description": "이메일 본문"}
         },
-        "required": ["to", "subject", "body", "attach_summary_ids"],
+        "required": ["to", "subject", "body"],
         "additionalProperties": False
     },
     "strict": True
@@ -221,13 +204,9 @@ confirm_tools = [
             "properties": {
                 "to": {"type": ["string", "null"], "description": "새 수신자 주소. 바꾸지 않으면 null"},
                 "subject": {"type": ["string", "null"], "description": "새 제목. 바꾸지 않으면 null"},
-                "body": {"type": ["string", "null"], "description": "수정된 본문 전체. 바꾸지 않으면 null"},
-                "attach_summary_ids": {
-                    "anyOf": [{"type": "array", "items": {"type": "integer"}}, {"type": "null"}],
-                    "description": "첨부할 회의 요약 id 전체 목록(빈 배열이면 첨부 없음). 바꾸지 않으면 null"
-                }
+                "body": {"type": ["string", "null"], "description": "수정된 본문 전체. 바꾸지 않으면 null"}
             },
-            "required": ["to", "subject", "body", "attach_summary_ids"],
+            "required": ["to", "subject", "body"],
             "additionalProperties": False
         },
         "strict": True
@@ -341,11 +320,9 @@ def current_draft():
         "to": st.session_state.get(f"draft_to_{did}", draft["to"]).strip(),
         "subject": st.session_state.get(f"draft_subject_{did}", draft["subject"]).strip(),
         "body": st.session_state.get(f"draft_body_{did}", draft["body"]),
-        # 화면에서 첨부를 뺀 경우 그 값을 사용
-        "attachments": list(st.session_state.get(f"draft_att_{did}", draft.get("attachments", []))),
     }
 
-def update_draft(to, subject, body, attach_ids=None):
+def update_draft(to, subject, body):
     """음성/텍스트 지시로 초안을 수정한다. 값이 있는 항목만 바꾸고 화면 입력창을 새 값으로 갱신한다."""
     draft = current_draft()
     if not draft:
@@ -353,44 +330,10 @@ def update_draft(to, subject, body, attach_ids=None):
     for key, value in (("to", to), ("subject", subject), ("body", body)):
         if value is not None and str(value).strip():
             draft[key] = str(value).strip() if key != "body" else str(value)
-    result = {"status": "pending_user_confirmation",
-              "note": "초안을 수정했습니다. 아직 발송되지 않았으며 사용자가 다시 확인해야 합니다."}
-    if attach_ids is not None:
-        draft["attachments"], info = check_attachments(attach_ids)
-        result.update(info)
     st.session_state.email_draft = draft
     st.session_state.draft_id += 1     # 입력창이 새 값으로 다시 그려지도록 키를 바꿈
-    return result
-
-def check_attachments(ids):
-    """첨부 요청된 요약 id를 확인한다. (첨부할 id 목록, 도구 결과에 넣을 정보)"""
-    ids = list(dict.fromkeys(int(i) for i in ids or []))
-    if not ids:
-        return [], {"attachments": []}
-    if not PDF_READY:
-        return [], {"attachments": [], "attachment_error": PDF_MISSING_MSG}
-    records = {r["id"]: r for r in load_summaries()}
-    valid = [i for i in ids if i in records]
-    info = {"attachments": [pdf_file_name(records[i]) for i in valid]}
-    missing = [i for i in ids if i not in records]
-    if missing:
-        info["attachment_error"] = f"저장된 회의 요약에 없는 id라 첨부하지 못했습니다: {missing}"
-    return valid, info
-
-def build_attachments(ids):
-    """요약 id 목록 → 메일 첨부용 [(PDF 파일명, PDF bytes)]."""
-    records = {r["id"]: r for r in load_summaries()}
-    return [(pdf_file_name(records[i]), record_pdf(records[i])) for i in ids or [] if i in records]
-
-def send_with_attachments(to, subject, body, attach_ids):
-    """초안 발송: 요약 PDF를 만들어 첨부한 뒤 보낸다."""
-    try:
-        files = build_attachments(attach_ids) if attach_ids and PDF_READY else []
-    except Exception as e:
-        return {"status": "failed", "error": f"PDF 첨부 파일을 만들지 못했습니다: {e}"}
-    if attach_ids and not PDF_READY:
-        return {"status": "failed", "error": PDF_MISSING_MSG}
-    return send_email(to, subject, body, files)
+    return {"status": "pending_user_confirmation",
+            "note": "초안을 수정했습니다. 아직 발송되지 않았으며 사용자가 다시 확인해야 합니다."}
 
 def finish_draft(action, user_text):
     """대기 중인 초안을 발송하거나 취소한다. 화면에서 수정한 값이 있으면 그 값을 사용한다."""
@@ -407,9 +350,9 @@ def finish_draft(action, user_text):
     if action == "cancel":
         add_message(kind="mail", role="system", status="cancelled", to=to, error="")
         return {"status": "cancelled"}
-    result = send_with_attachments(to, subject, body, draft.get("attachments", []))
+    result = send_email(to, subject, body)
     add_message(kind="mail", role="system", status=result["status"], to=to,
-                error=result.get("error", ""), attached=len(result.get("attachments", [])))
+                error=result.get("error", ""))
     return result
 
 # ---------------------------------------------------------------
@@ -449,9 +392,6 @@ def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
 2. send_email은 바로 발송하지 않고 화면에서 확인하는 초안을 만듭니다. status가 pending_user_confirmation이면 "초안을 만들었으니 화면에서 확인하신 뒤 보내 달라고 말씀해 주세요"라고 안내하세요.
 3. 대기 중인 초안이 있을 때 김 대리가 "보내줘", "발송해줘"라고 명시적으로 말하면 confirm_send_email을 사용하세요. 초안을 새로 만들거나 수정한 요청에서는 발송하지 마세요.
 4. 초안 수정 요청은 update_email_draft로 바꿀 항목만 반영하고(본문은 수정된 전체 내용), 취소 요청은 cancel_email_draft를 사용하세요.
-5. 회의 요약 PDF(보고서)를 첨부해 달라고 하면 send_email의 attach_summary_ids에 [저장된 회의 요약 목록]의 id를 넣으세요. 첨부 요청이 없으면 빈 배열로 두세요.
-6. 첨부할 회의 요약이 아직 저장되지 않았으면 먼저 회의 전체를 요약해 save_summary로 저장하고, 돌려받은 id를 첨부하세요. 어느 회의인지 불분명하면 되물으세요.
-7. 본문에 'PDF를 첨부했다'고 쓰는 것은 실제로 attach_summary_ids에 넣었을 때만 하세요. 도구 결과에 attachment_error가 있으면 그 내용을 알려 주세요.
 
 [마감 일정]
 1. 김 대리가 일정 표시, 추가, 변경, 삭제를 요청하면 add_deadline, update_deadline, delete_deadline을 사용하세요.
@@ -462,8 +402,8 @@ def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
 1. 회의 전체 요약을 요청받았을 때만 save_summary로 저장하세요. 업무 안내나 후속 조치처럼 일부만 묻는 요청에서는 저장하지 마세요.
 2. 회의명은 회의록에서 정하고 지어내지 마세요.
 3. 과거 회의를 요청받으면 search_summaries로 찾아 저장된 내용을 바꾸지 말고 전달하세요. 여러 건이면 날짜와 회의명 목록을 보여 주고 어느 회의인지 되물으세요.
-4. 저장된 요약을 메일로 보내 달라고 하면 search_summaries나 [저장된 회의 요약 목록]으로 찾은 뒤 send_email로 초안을 만드세요. PDF로 보내 달라고 하면 attach_summary_ids로 첨부하세요.
-5. 요약을 PDF나 보고서로 달라고 하면 회의 전체를 요약해 save_summary로 저장한 뒤, "답변 아래의 PDF 보고서 저장 버튼으로 내려받거나 미리보기로 확인하실 수 있습니다"라고 안내하세요. 이미 저장된 회의는 회의 기록 탭에서 받을 수 있습니다.
+4. 저장된 요약을 메일로 보내 달라고 하면 search_summaries로 찾은 뒤 send_email로 초안을 만드세요.
+5. 요약을 PDF나 보고서로 달라고 하면 회의 전체를 요약해 save_summary로 저장한 뒤, "대화창 아래의 PDF 보고서 저장 버튼으로 내려받거나 미리보기로 확인하실 수 있습니다"라고 안내하세요. 이미 저장된 회의는 회의 기록 탭에서 받을 수 있습니다.
 
 [회의록 분석]
 1. 김 대리에게 배정된 업무를 물으면 담당 업무, 기한, 산출물, 진행 방식, 관련 사항을 자세히 안내하세요.
@@ -517,9 +457,7 @@ def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
         role += f"\n사용자가 따로 말하지 않으면 이메일 수신자는 {recipient} 입니다.\n"
     if draft:
         role += (f"\n[발송 대기 중인 이메일 초안]\n받는 사람: {draft['to']}\n"
-                 f"제목: {draft['subject']}\n본문: {draft['body']}\n"
-                 f"첨부한 회의 요약 id: {draft.get('attachments') or '없음'}\n[초안 끝]\n")
-    role += saved_summary_context()
+                 f"제목: {draft['subject']}\n본문: {draft['body']}\n[초안 끝]\n")
     if meeting_text:
         if len(meetings) > 1:
             role += "\n[회의 날짜] 회의록이 여러 개이며 회의록마다 회의 날짜가 다릅니다.\n"
@@ -544,14 +482,6 @@ def build_instructions(meeting_text, recipient, draft=None, deadlines=None):
     role += ("\n답변이 끝나면 필요할 때만, 김 대리가 이어서 해볼 만한 요청을 한 문장으로 짧게 제안하세요. "
              "예: '원하시면 이 내용을 메일로 보내 드릴까요?'\n")
     return role
-
-def saved_summary_context(limit=10):
-    """메일 첨부용: 저장된 회의 요약의 id·날짜·회의명 (최근 회의 순)."""
-    data = filter_summaries(load_summaries())[:limit]
-    if not data:
-        return "\n[저장된 회의 요약 목록] 없음\n"
-    lines = [f"- id {d['id']} | {d['meeting_date']} | {d['title']}" for d in data]
-    return "\n[저장된 회의 요약 목록 - PDF 첨부용 id]\n" + "\n".join(lines) + "\n[목록 끝]\n"
 
 # ---------------------------------------------------------------
 # 음성 → 텍스트 (STT)
@@ -661,8 +591,7 @@ def ask_able(user_text, history, meeting_text, recipient):
                     else:
                         result = finish_draft("send", user_text)
                 elif item.name == "update_email_draft" and pending:
-                    result = update_draft(arguments.get("to"), arguments.get("subject"), arguments.get("body"),
-                                          arguments.get("attach_summary_ids"))
+                    result = update_draft(arguments.get("to"), arguments.get("subject"), arguments.get("body"))
                     changed = True
                 elif item.name == "cancel_email_draft" and pending:
                     result = finish_draft("cancel", user_text)
@@ -685,18 +614,15 @@ def ask_able(user_text, history, meeting_text, recipient):
                     result = {"status": "failed", "error": "허용되지 않은 도구입니다."}
                 else:
                     # 바로 발송하지 않고 사용자 확인용 초안으로 저장
-                    attach_ids, attach_info = check_attachments(arguments.get("attach_summary_ids"))
                     st.session_state.draft_id += 1
                     st.session_state.email_draft = {
                         "to": arguments.get("to") or recipient,
                         "subject": arguments.get("subject", ""),
                         "body": arguments.get("body", ""),
-                        "attachments": attach_ids,
                     }
                     changed = True
                     result = {"status": "pending_user_confirmation",
-                              "note": "아직 발송되지 않았습니다. 사용자가 화면에서 확인 후 발송합니다.",
-                              **attach_info}
+                              "note": "아직 발송되지 않았습니다. 사용자가 화면에서 확인 후 발송합니다."}
             except (ValueError, TypeError) as e:
                 result = {"status": "failed", "error": str(e)}
             messages.append({
@@ -735,8 +661,7 @@ def name_line(text):
 def render_message(m, show_text=True, autoplay=False):
     if m["kind"] == "mail":
         if m["status"] == "success":
-            att = f" (📎 PDF {m['attached']}개 첨부)" if m.get("attached") else ""
-            st.success(f"📧 [{m['time']}] 이메일을 {m['to']} 로 발송했습니다.{att}")
+            st.success(f"📧 [{m['time']}] 이메일을 {m['to']} 로 발송했습니다.")
         elif m["status"] == "cancelled":
             st.info(f"📧 [{m['time']}] 이메일 발송을 취소했습니다.")
         else:
@@ -1628,9 +1553,7 @@ def render_records_tab(recipient):
             pdf_download_button(d, key=f"pdf_{d['id']}", container=c3)
             if c1.button("📧 기본 수신자에게 보내기", key=f"mail_{d['id']}", disabled=not recipient,
                          use_container_width=True):
-                with st.spinner("메일을 보내는 중..."):
-                    r = send_with_attachments(recipient, f"[회의 요약] {d['title']} ({d['meeting_date']})",
-                                              d["summary"], [d["id"]] if PDF_READY else [])
+                r = send_email(recipient, f"[회의 요약] {d['title']} ({d['meeting_date']})", d["summary"])
                 if r["status"] == "success":
                     st.success(f"{recipient} 로 보냈습니다.")
                 else:
@@ -2268,11 +2191,19 @@ with chat_area:
     old = st.session_state.messages
     if not old and not pending_text:
         with st.chat_message("assistant", avatar=ROBOT_AVATAR):
-            st.markdown("안녕하세요, 김 대리님! 개인비서 **에비**입니다. 👋\n\n"
-                        "**어떤 업무를 도와드릴까요?**")
-            st.markdown("- 아래에서 **음성 녹음** 또는 **채팅**으로 요청하세요.\n"
-                        "- 음성은 **\"에비, 회의 내용 요약해 줘\"**처럼 이름 뒤에 바로 요청을 붙이면 더 정확해요.\n"
-                        "- 입력창 바로 위의 **자주 쓰는 요청** 버튼도 사용할 수 있어요.")
+            # 첫 인사: 기본 글자(16px)보다 2px 큰 18px, 인사와 질문 사이 간격은 좁게 (1.0rem)
+            st.markdown(
+                "<div style='font-size:17px;line-height:1.6;'>"
+                "<div style='margin:0 0 1.0rem;'>안녕하세요, 김 대리님! 개인비서 <b>에비</b>입니다. 👋</div>"
+                "<div style='margin:0 0 0.9rem;font-weight:700;'>어떤 업무를 도와드릴까요?</div>"
+                "<ul style='margin:0;padding-left:1.4rem;'>"
+                "<li style='margin-bottom:0.25rem;'>아래에서 <b>음성 녹음</b> 또는 <b>채팅</b>으로 요청하세요.</li>"
+                "<li style='margin-bottom:0.25rem;'>음성은 <b>\"에비, 회의 내용 요약해 줘\"</b>처럼 "
+                "이름 뒤에 바로 요청을 붙이면 더 정확해요.</li>"
+                "<li>입력창 바로 위의 <b>자주 쓰는 요청</b> 버튼도 사용할 수 있어요.</li>"
+                "</ul></div>",
+                unsafe_allow_html=True,
+            )
 
     # 오래된 메시지는 접어서 보여 줌
     if len(old) > RECENT_OPEN:
@@ -2319,8 +2250,6 @@ with chat_area:
                         f"받는 사람은 {new_draft['to']}, 제목은 {new_draft['subject']}입니다. "
                         f"본문입니다. {new_draft['body']}"
                     )
-                    if new_draft.get("attachments"):
-                        speech_text += f"\n회의 요약 보고서 PDF {len(new_draft['attachments'])}개를 첨부했습니다."
                 try:
                     audio = synthesize(speech_text)
                 except Exception as e:
@@ -2364,19 +2293,11 @@ if draft:
             d_to = st.text_input("받는 사람", value=draft["to"], key=f"draft_to_{did}")
             d_subject = st.text_input("제목", value=draft["subject"], key=f"draft_subject_{did}")
             d_body = st.text_area("본문", value=draft["body"], height=160, key=f"draft_body_{did}")
-            d_att = []
-            if draft.get("attachments"):
-                names = {r["id"]: pdf_file_name(r) for r in load_summaries()}
-                options = [i for i in draft["attachments"] if i in names]
-                d_att = st.multiselect("📎 첨부 파일 (PDF 보고서)", options=options, default=options,
-                                       format_func=lambda i: names.get(i, f"요약 {i}"),
-                                       key=f"draft_att_{did}", help="✕를 누르면 첨부에서 뺄 수 있어요.")
             c1, c2 = st.columns(2)
             if c1.button("✅ 이 내용으로 발송", type="primary", key=f"draft_send_{did}"):
-                with st.spinner("메일을 보내는 중..."):
-                    result = send_with_attachments(d_to.strip(), d_subject.strip(), d_body, d_att)
-                add_message(kind="mail", role="system", status=result["status"], to=d_to.strip(),
-                            error=result.get("error", ""), attached=len(result.get("attachments", [])))
+                result = send_email(d_to.strip(), d_subject.strip(), d_body)
+                add_message(kind="mail", role="system",
+                            status=result["status"], to=d_to.strip(), error=result.get("error", ""))
                 st.session_state.email_draft = None
                 st.rerun()
             if c2.button("❌ 취소", key=f"draft_cancel_{did}"):
