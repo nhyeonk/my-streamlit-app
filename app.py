@@ -1,3 +1,5 @@
+%%writefile app.py
+
 import os
 import json
 import ssl
@@ -734,13 +736,15 @@ def name_line(text):
 
 def render_message(m, show_text=True, autoplay=False):
     if m["kind"] == "mail":
-        if m["status"] == "success":
-            att = f" (📎 PDF {m['attached']}개 첨부)" if m.get("attached") else ""
-            st.success(f"📧 [{m['time']}] 이메일을 {m['to']} 로 발송했습니다.{att}")
-        elif m["status"] == "cancelled":
-            st.info(f"📧 [{m['time']}] 이메일 발송을 취소했습니다.")
-        else:
-            st.error(f"📧 [{m['time']}] 이메일 발송 실패: {m['error']}")
+        # 에비 답변 안의 '요약 저장' 초록 바와 같은 너비가 되도록 채팅 말풍선 안에 표시
+        with st.chat_message("assistant", avatar="📧"):
+            if m["status"] == "success":
+                att = f" (📎 PDF {m['attached']}개 첨부)" if m.get("attached") else ""
+                st.success(f"[{m['time']}] 이메일을 {m['to']} 로 발송했습니다.{att}")
+            elif m["status"] == "cancelled":
+                st.info(f"[{m['time']}] 이메일 발송을 취소했습니다.")
+            else:
+                st.error(f"[{m['time']}] 이메일 발송 실패: {m['error']}")
         return
 
     if m["role"] == "user":
@@ -2379,15 +2383,17 @@ if draft:
                 d_att = st.multiselect("📎 첨부 파일 (PDF 보고서)", options=options, default=options,
                                        format_func=lambda i: names.get(i, f"요약 {i}"),
                                        key=f"draft_att_{did}", help="✕를 누르면 첨부에서 뺄 수 있어요.")
-            c1, c2 = st.columns(2)
-            if c1.button("✅ 이 내용으로 발송", type="primary", key=f"draft_send_{did}"):
+            # 발송·취소 버튼을 왼쪽에 나란히 붙여 배치
+            c1, c2, _ = st.columns([1, 1, 4], gap="small")
+            if c1.button("✅ 이 내용으로 발송", type="primary", key=f"draft_send_{did}",
+                         use_container_width=True):
                 with st.spinner("메일을 보내는 중..."):
                     result = send_with_attachments(d_to.strip(), d_subject.strip(), d_body, d_att)
                 add_message(kind="mail", role="system", status=result["status"], to=d_to.strip(),
                             error=result.get("error", ""), attached=len(result.get("attachments", [])))
                 st.session_state.email_draft = None
                 st.rerun()
-            if c2.button("❌ 취소", key=f"draft_cancel_{did}"):
+            if c2.button("❌ 취소", key=f"draft_cancel_{did}", use_container_width=True):
                 add_message(kind="mail", role="system", status="cancelled", to=d_to.strip(), error="")
                 st.session_state.email_draft = None
                 st.rerun()
