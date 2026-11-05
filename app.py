@@ -1085,6 +1085,16 @@ def ask_in_chat(text):
     queue_request(text)
     request_chat_tab()
 
+def request_analysis():
+    """'회의록 분석 시작' 버튼: 업무를 추출하고 브리핑을 대화 탭에 보여 준다."""
+    st.session_state.analyze_request = "button"
+    request_chat_tab()
+
+def analyze_button(key):
+    st.button("🔍 회의록 분석 시작", key=key, type="primary", use_container_width=True,
+              on_click=request_analysis,
+              help="회의록에서 업무·마감일을 찾아 우선순위 탭과 마감 달력에 표시합니다.")
+
 def request_chat_tab():
     """다음 화면에서 대화 탭으로 이동하도록 표시한다 (어느 탭에서 요청해도 대화 탭에서 답을 보게)."""
     st.session_state.chat_navigation = True
@@ -1685,8 +1695,7 @@ def render_deadline_tab():
                        file_name="able_deadlines.ics", mime="text/calendar",
                        use_container_width=True, disabled=not dated)
     if b2.button("🔄 업무 다시 추출", use_container_width=True):
-        st.session_state.deadline_key = None
-        st.session_state.skip_briefing = True
+        st.session_state.analyze_request = "redo"   # 브리핑 없이 다시 추출
         st.rerun()
     return deadlines
 
@@ -1695,7 +1704,8 @@ def render_deadline_tab():
 # ---------------------------------------------------------------
 defaults = {
     "deadline_items": [],    # 회의록에서 추출한 마감 일정 (편집기 초기값)
-    "deadline_key": None,    # 마지막으로 추출한 회의록/날짜 식별값
+    "analyzed_key": None,    # 업무 추출을 마친 회의록/날짜 식별값 (업로드만으로는 추출하지 않음)
+    "analyze_failed_key": None,  # 요청으로 자동 추출하다 실패한 회의록 (같은 회의록에서 반복 실패 방지)
     "deadline_version": 0,   # 마감 일정 편집기 초기화용
     "deadline_changed": False,  # 이번 요청에서 도구가 마감 일정을 바꿨는지
     "cal_month": None,       # 달력에 표시 중인 달 (그 달의 1일)
@@ -1745,6 +1755,7 @@ with st.sidebar:
             st.text(text[:1500])
         meetings.append({"name": f.name, "text": text, "date": d})
     meetings.sort(key=lambda m: m["date"])   # 회의 날짜순
+    analyze_area = st.container()            # 🔍 회의록 분석 시작 버튼 (아래에서 채움)
 
     # 기존 코드와 호환: 회의록이 하나면 그대로, 여러 개면 구분선을 넣어 하나로 이어 붙임
     if len(meetings) == 1:
@@ -1884,41 +1895,59 @@ with tab_rec:
 # ---------------------------------------------------------------
 # 마감 달력 탭: 회의록이 바뀌면 마감 일정을 다시 추출 (에이블 답변보다 먼저 실행해 목록을 반영)
 # ---------------------------------------------------------------
+analyzed = False
 if meeting_text:
     priority_key = hashlib.md5(f"{meeting_text}|{meeting_date}".encode()).hexdigest()
-    if st.session_state.priority_key != priority_key or st.session_state.deadline_key is None:
-        # try 밖에서 꺼내야 실패해도 플래그가 남지 않음
-        skip_briefing = st.session_state.pop("skip_briefing", False)
+    if st.session_state.priority_key != priority_key:
+        # 회의록(또는 회의 날짜)이 바뀜: 이전 회의록의 결과만 비우고, 사용자가 실행할 때까지 기다린다
+        if st.session_state.priority_key is not None:
+            set_deadlines([])
+            st.session_state.deadline_changed = False
+        st.session_state.priority_key = priority_key
+        st.session_state.analyzed_key = None
+        st.session_state.analyze_failed_key = None
+
+    # 실행 조건: ① 분석 버튼 / 다시 추출 버튼  ② 에이블에게 요청(명령)을 보냈는데 아직 추출 전
+    reason = st.session_state.pop("analyze_request", None)
+    if (reason is None and st.session_state.get("chip_request")
+            and st.session_state.analyzed_key != priority_key
+            and st.session_state.analyze_failed_key != priority_key):
+        reason = "command"
+    if reason:
         with st.spinner("에이블이 업무를 정리하는 중..."):
             try:
                 items = extract_tasks(meeting_text, meeting_date)
                 set_deadlines(items)
                 st.session_state.deadline_changed = False
-                if not skip_briefing:
+                st.session_state.analyzed_key = priority_key
+                if reason == "button":   # 버튼으로 실행했을 때만 브리핑 메시지 표시
                     add_message(role="assistant", content=briefing_text(st.session_state.priority_items))
             except Exception as e:
                 st.error(f"업무 추출 중 오류가 발생했습니다: {e}")
-                # 다른 회의록으로 바꿨다가 실패한 경우에만 이전 회의록 업무를 비움
-                if st.session_state.priority_key != priority_key:
-                    set_deadlines([])
-                    st.session_state.deadline_changed = False
-        # 성공·실패와 관계없이 기록 → 실패 시 무한 재호출 방지
-        st.session_state.priority_key = priority_key
-        st.session_state.deadline_key = priority_key
+                st.session_state.analyze_failed_key = priority_key
+    analyzed = st.session_state.analyzed_key == priority_key
 else:
     if st.session_state.priority_key is not None:   # 회의록을 방금 지운 경우에만 비움
         set_deadlines([])
         st.session_state.deadline_changed = False
     st.session_state.priority_key = None
+    st.session_state.analyzed_key = None
+
+with analyze_area:
+    if meeting_text and not analyzed:
+        st.caption("업로드만으로는 분석하지 않아요. 버튼을 누르거나 에이블에게 요청하면 업무를 정리합니다.")
+        analyze_button("analyze_sidebar")
 
 set_deadlines(st.session_state.deadline_items, refresh_editor=False)
 
 with tab_cal:
     if not meeting_text and not st.session_state.deadline_items:
         st.session_state.deadlines = []
-        st.session_state.deadline_key = None
-        st.info("왼쪽에서 회의록(txt)을 업로드하면 마감 일정을 자동으로 찾아 달력에 표시합니다. "
+        st.info("왼쪽에서 회의록(txt)을 업로드한 뒤 '회의록 분석 시작'을 누르면 마감 일정을 찾아 달력에 표시합니다. "
                 "에이블에게 \"다음 주 금요일에 ○○ 마감 표시해줘\"라고 말해도 됩니다.")
+    elif meeting_text and not analyzed:
+        st.info("회의록이 업로드되었어요. 분석을 시작하면 마감 일정을 찾아 달력에 표시합니다.")
+        analyze_button("analyze_cal")
     elif meeting_text:
         if len(meetings) > 1:
             st.caption("회의록 " + ", ".join(f"{m['name']}({m['date'].isoformat()})" for m in meetings)
@@ -1934,10 +1963,13 @@ with tab_cal:
 with tab_pri:
     if st.session_state.priority_items:
         render_priority_tab(st.session_state.priority_items)
+    elif meeting_text and not analyzed:
+        st.info("회의록이 업로드되었어요. 분석을 시작하면 김 대리님 업무를 긴급·중요 기준으로 나눠 보여 드려요.")
+        analyze_button("analyze_pri")
     elif meeting_text:
         st.info("이번 회의록에서 김 대리님께 배정된 업무를 찾지 못했어요.")
     else:
-        st.info("왼쪽에서 회의록(txt)을 업로드하면 김 대리님 업무를 긴급·중요 기준으로 나눠 보여 드려요.")
+        st.info("왼쪽에서 회의록(txt)을 업로드한 뒤 분석을 시작하면 김 대리님 업무를 긴급·중요 기준으로 나눠 보여 드려요.")
 
 # ---------------------------------------------------------------
 # 이번 실행에서 처리할 요청 결정: 버튼 요청 > 텍스트 > 새 녹음
@@ -1958,6 +1990,8 @@ with chat_area:
             st.markdown("안녕하세요, 김 대리님! 개인비서 **에이블**입니다. 👋")
             if not meetings:
                 st.warning("먼저 왼쪽에서 회의록(txt)을 업로드해 주세요.")
+            elif not analyzed:
+                st.info("회의록이 올라왔어요. 왼쪽의 **회의록 분석 시작** 버튼을 누르거나 요청을 보내 주시면 정리를 시작할게요.")
             st.markdown("- 아래에서 **음성 녹음** 또는 **채팅**으로 요청하세요.\n"
                         "- 입력창 바로 위의 **자주 쓰는 요청** 버튼도 사용할 수 있어요.")
 
