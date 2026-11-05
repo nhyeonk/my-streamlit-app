@@ -579,7 +579,7 @@ def ask_able(user_text, history, meeting_text, recipient):
                     result = save_summary(arguments.get("title", ""), arguments.get("meeting_date", ""),
                                           arguments.get("summary", ""))
                     if result.get("status") == "success":
-                        st.session_state.last_summary_id = result["id"]   # 대화 탭에 PDF 버튼 표시용
+                        st.session_state.request_summary_ids.append(result["id"])  # 답변 아래 PDF 버튼 표시용
                     st.session_state.deadline_changed = True   # 회의 기록 탭을 새 값으로 다시 그리기 위함
                 elif item.name == "search_summaries":
                     result = search_summaries(arguments.get("keyword", ""), arguments.get("date_from", ""),
@@ -612,6 +612,7 @@ def now_str():
     return datetime.now(ZoneInfo("Asia/Seoul")).strftime("%H:%M")
 
 def add_message(**kwargs):
+    kwargs.setdefault("uid", uuid.uuid4().hex)
     kwargs.setdefault("kind", "text")
     kwargs.setdefault("time", now_str())
     st.session_state.messages.append(kwargs)
@@ -649,6 +650,24 @@ def render_message(m, show_text=True, autoplay=False):
                 st.caption("(텍스트 숨김 모드: 음성으로 확인하세요)")
             if m.get("audio"):
                 st.audio(m["audio"], format="audio/mp3", autoplay=autoplay)
+            for rid in m.get("summary_ids", []):
+                render_summary_actions(rid, m.get("uid", ""))
+
+def render_summary_actions(record_id, msg_uid):
+    """요약 답변 아래: 저장 완료 안내(전체 너비) + PDF 저장 / 미리보기 버튼 2개."""
+    record = next((x for x in load_summaries() if x["id"] == record_id), None)
+    if not record:          # 회의 기록 탭에서 삭제된 요약
+        return
+    key = f"{msg_uid}_{record_id}"
+    st.success(f"📝 회의 요약을 저장했습니다: {record['meeting_date']} {record['title']}")
+    previewing = st.session_state.get("preview_summary_key") == key
+    c1, c2 = st.columns(2)
+    pdf_download_button(record, key=f"pdf_{key}", container=c1)
+    c2.button("🙈 요약 보고서 닫기" if previewing else "👁️ 요약 보고서 미리보기",
+              key=f"preview_{key}", use_container_width=True,
+              on_click=toggle_summary_preview, args=(key,))
+    if previewing:
+        show_pdf_preview(record)
 
 def transcript_text():
     lines = []
@@ -1425,10 +1444,10 @@ def show_pdf_preview(record):
             if len(pages) > 1:
                 st.caption(f"{no} / {len(pages)} 페이지")
 
-def toggle_summary_preview(record_id):
-    """대화 탭의 '요약 보고서 미리보기' 버튼: 누를 때마다 열고 닫는다."""
-    current = st.session_state.get("preview_summary_id")
-    st.session_state.preview_summary_id = None if current == record_id else record_id
+def toggle_summary_preview(key):
+    """요약 답변 아래 '요약 보고서 미리보기' 버튼: 누를 때마다 열고 닫는다."""
+    current = st.session_state.get("preview_summary_key")
+    st.session_state.preview_summary_key = None if current == key else key
 
 def render_records_tab(recipient):
     """회의 기록 탭: 저장된 요약을 검색하고, 메일로 보내거나 삭제한다."""
@@ -1696,7 +1715,7 @@ defaults = {
     "priority_key": None,    # 마지막으로 분류한 회의록/날짜 식별값
     "messages": [],          # 화면용 대화 기록 (text / mail)
     "email_draft": None,     # 발송 전 확인 대기 중인 이메일 초안
-    "last_summary_id": None, # 대화에서 마지막으로 저장한 회의 요약 (PDF 보고서용)
+    "request_summary_ids": [],  # 이번 요청에서 저장한 회의 요약 id (답변 아래 PDF 버튼용)
     "draft_id": 0,
     "recorder_key": 0,       # 녹음 위젯 초기화용
     "last_audio_hash": None, # 이미 인식한 녹음 (중복 인식 방지)
@@ -1763,7 +1782,7 @@ with st.sidebar:
     if st.button("🗑️ 대화 초기화", use_container_width=True):
         st.session_state.messages = []
         st.session_state.email_draft = None
-        st.session_state.last_summary_id = None
+        st.session_state.preview_summary_key = None
         st.session_state.last_audio_hash = None
         st.session_state.voice_text = None
         st.session_state.voice_audio = None
@@ -1809,7 +1828,6 @@ with tab_chat:
     # 대화창은 전체 너비. 이메일 초안은 대화창 안(맨 아래)에 카드로 들어가 함께 스크롤된다.
     chat_area = st.container(height=CHAT_HEIGHT, border=True)
     draft_area = chat_area
-    report_area = st.container()   # 방금 요약한 회의의 PDF 저장 / 미리보기
 
 
 # Shared input is outside tab containers, so it stays visible on every tab.
@@ -2008,6 +2026,7 @@ with chat_area:
 
             with st.spinner("답변 준비 중..."):
                 draft_before = st.session_state.draft_id
+                st.session_state.request_summary_ids = []
                 answer = ask_able(user_text, history, meeting_text, recipient)
 
                 # 새 이메일 초안이 만들어졌으면 초안 내용도 음성으로 함께 읽어 줌
@@ -2028,7 +2047,8 @@ with chat_area:
             # 음성 지시로 발송/취소된 경우 결과 줄을 먼저 표시
             for m in st.session_state.messages[n_before:]:
                 render_message(m)
-            answer_msg = add_message(role="assistant", content=answer, audio=audio)
+            answer_msg = add_message(role="assistant", content=answer, audio=audio,
+                                     summary_ids=list(dict.fromkeys(st.session_state.request_summary_ids)))
             finish_request()                # 답변까지 저장됐으므로 요청을 끝냄
             prune_audio()
             render_message(answer_msg, show_text or not audio, autoplay=True)
@@ -2047,25 +2067,6 @@ if st.session_state.deadline_changed:
     st.session_state.deadline_changed = False
     st.session_state.autoplay_last = True
     st.rerun()
-
-# ---------------------------------------------------------------
-# 방금 요약한 회의 → PDF 보고서 저장 / 미리보기
-# ---------------------------------------------------------------
-if st.session_state.last_summary_id is not None:
-    record = next((x for x in load_summaries() if x["id"] == st.session_state.last_summary_id), None)
-    if record:
-        with report_area:
-            # 저장 완료 안내는 전체 너비로, 그 아래에 버튼 2개를 나란히 둔다
-            st.success(f"📝 회의 요약을 저장했습니다: {record['meeting_date']} {record['title']}")
-            previewing = st.session_state.get("preview_summary_id") == record["id"]
-            c1, c2 = st.columns(2)
-            pdf_download_button(record, key="pdf_latest", container=c1)
-            c2.button("🙈 요약 보고서 닫기" if previewing else "👁️ 요약 보고서 미리보기",
-                      key="preview_latest", use_container_width=True,
-                      on_click=toggle_summary_preview, args=(record["id"],))
-            if previewing:
-                show_pdf_preview(record)
-
 
 # ---------------------------------------------------------------
 # 이메일 발송 전 확인 (사용자가 수정 후 발송 / 취소)
