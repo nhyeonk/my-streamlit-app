@@ -56,7 +56,7 @@ ABLE_HEAD = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAPAAAAC2CAYAAADnVADjAACkVE
 ROBOT_URL = ABLE_MASCOT
 USER_AVATAR = "🧑‍💼"
 ROBOT_AVATAR = ABLE_HEAD    # 웃는 헤드셋 로봇 얼굴 아이콘
-CHAT_HEIGHT = 800      # 대화 영역 높이(px)
+CHAT_HEIGHT = 500      # 대화 영역 높이(px)
 MAX_HISTORY = 10       # LLM에 전달하는 대화 개수
 KEEP_AUDIO = 10        # 음성을 보관하는 최근 답변 개수
 QUAD_HEIGHT = 300      # 우선순위 4분면 각 칸의 업무 목록 높이(px), 넘치면 스크롤
@@ -1498,6 +1498,12 @@ CAL_CSS = (
     ".able-cal .pill{font-size:11px;color:#fff;border-radius:4px;padding:1px 5px;margin-bottom:2px;"
     "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}"
     # 우선순위 색: 1 빨강(긴급·중요) · 2 파랑(중요) · 3 주황(긴급) · 4 회색(둘 다 아님)
+    ".able-cal .pill{display:flex;align-items:center;justify-content:space-between;gap:4px;white-space:normal;}"
+    "[class*='st-key-caldone_']{display:none;}"
+    ".able-cal .pill .cb{cursor:pointer;flex:none;width:14px;height:14px;border:1.5px solid rgba(255,255,255,.9);border-radius:3px;"
+    "font-size:11px;line-height:12px;text-align:center;}"
+    ".able-cal .etc .cb{border-color:rgba(128,128,128,.8);}"
+    ".able-cal .pill.done{opacity:.55;}.able-cal .pill.done .t{text-decoration:line-through;}"
     ".able-cal .p1{background:#E5484D;}.able-cal .p2{background:#3E63DD;}"
     ".able-cal .p3{background:#F76B15;}.able-cal .p4{background:#8B8D98;}"
     ".able-cal .kim{background:#12A594;}"   # 김 대리 업무지만 우선순위 분류 전
@@ -1589,13 +1595,74 @@ def month_grid_html(year, month, dated, today, max_items=3, priority_items=None)
             styled.sort(key=lambda x: rank[x[1]])
             items = styled
             pills = "".join(
-                f"<div class='pill {cls}' title='{escape(label)} · {escape(d['task'])}'>"
-                f"{icon}{escape(d['task'])}</div>" for d, cls, icon, label in items[:max_items])
+                f"<div class='pill {cls}{' done' if d.get('done') else ''}' "
+                f"title='{escape(label)} · {escape(d['task'])}'>"
+                f"<span class='t'>{icon}{escape(d['task'])}</span>"
+                f"<span class='cb' data-id='{d['id']}'>{'✓' if d.get('done') else ''}</span></div>"
+                for d, cls, icon, label in items[:max_items])
             more = f"<div class='more'>+{len(items) - max_items}건 더</div>" if len(items) > max_items else ""
             cells.append(f"<td class='{cls.strip()}'><div class='num'>{day.day}</div>{pills}{more}</td>")
         rows.append("<tr>" + "".join(cells) + "</tr>")
     # 줄바꿈/들여쓰기가 없어야 마크다운이 코드 블록으로 오인하지 않는다
     return CAL_CSS + "<table class='able-cal'>" + "".join(rows) + "</table>"
+
+def _after_deadline_edit(month=None):
+    """달력에서 일정을 바꾼 뒤: 표를 새 값으로 다시 그리되 보던 달은 유지한다."""
+    st.session_state.deadline_version += 1
+    st.session_state.cal_version = st.session_state.deadline_version
+    if month:
+        st.session_state.cal_month = month.replace(day=1)
+
+def toggle_done(task_id):
+    """달력의 체크박스: 완료 상태를 뒤집는다."""
+    for d in st.session_state.deadline_items:
+        if d["id"] == task_id:
+            d["done"] = not d.get("done", False)
+    _after_deadline_edit()
+
+def set_due_date(task_id, key):
+    """날짜 미정 일정에 날짜를 지정한다."""
+    due = st.session_state.get(key)
+    for d in st.session_state.deadline_items:
+        if d["id"] == task_id and due:
+            d["due"] = due
+    _after_deadline_edit(due)
+
+CAL_MD_COLORS = {"p1": "red", "p2": "blue", "p3": "orange", "p4": "gray", "kim": "green"}
+
+def render_month_checkboxes(year, month, dated, today, priority_items):
+    """체크박스가 들어 있는 월간 달력 (칸마다 업무 + 완료 체크)."""
+    by_day = {}
+    for d in dated:
+        by_day.setdefault(d["due"], []).append(d)
+    rank = {"p1": 1, "p2": 2, "p3": 3, "p4": 4, "kim": 5, "etc": 6}
+    for col, name in zip(st.columns(7), "일월화수목금토"):
+        color = "#e5484d" if name == "일" else "#4f7cff" if name == "토" else "inherit"
+        col.markdown(f"<div style='text-align:center;font-weight:600;color:{color}'>{name}</div>",
+                     unsafe_allow_html=True)
+    for week in pycal.Calendar(firstweekday=6).monthdatescalendar(year, month):
+        for col, day in zip(st.columns(7), week):
+            with col.container(border=True, height=150):
+                if day == today:
+                    st.markdown(f":blue[**{day.day}**]")
+                elif day.month != month:
+                    st.caption(f":gray[{day.day}]")
+                else:
+                    st.caption(str(day.day))
+                styled = [(d, *pill_style(d, priority_items)) for d in by_day.get(day, [])]
+                styled.sort(key=lambda x: rank[x[1]])
+                for d, cls, icon, label in styled:
+                    done = bool(d.get("done"))
+                    text = d["task"].replace("[", "\\[").replace("]", "\\]")
+                    color = CAL_MD_COLORS.get(cls)
+                    if done:
+                        shown = f":gray[~~{text}~~]"
+                    elif color:
+                        shown = f":{color}-background[{icon}{text}]"
+                    else:
+                        shown = f"{icon}{text}"
+                    st.checkbox(shown, value=done, key=f"cal_done_{d['id']}_{int(done)}",
+                                on_change=toggle_done, args=(d["id"],), help=label)
 
 def render_deadline_tab():
     """마감 달력 탭: 요약, 월간 달력, 수정 가능한 목록, .ics 다운로드. 확정된 목록을 반환한다."""
@@ -1604,6 +1671,7 @@ def render_deadline_tab():
 
     summary_area = st.container()
     cal_area = st.container()
+    undated_area = st.container()   # 날짜 미정 일정: 표 위에 표시 (아래에서 채움)
 
     st.markdown("##### ✏️ 마감 일정 목록 (수정 · 추가 · 삭제 가능)")
     st.caption("AI가 찾은 결과는 틀릴 수 있어요. 표에서 직접 고치면 달력과 에이블의 답변에 바로 반영됩니다.")
@@ -1615,6 +1683,7 @@ def render_deadline_tab():
         "담당자": pd.Series([i["assignee"] for i in items], dtype="object"),
         "마감일": pd.Series(pd.to_datetime([i["due"] for i in items]), dtype="datetime64[ns]"),
         "김 대리 업무": pd.Series([bool(i["is_kim"]) for i in items], dtype="bool"),
+        "완료": pd.Series([bool(i.get("done")) for i in items], dtype="bool"),
         "원문 표현": pd.Series([i["due_text"] for i in items], dtype="object"),
     })
     edited = st.data_editor(
@@ -1624,6 +1693,7 @@ def render_deadline_tab():
             "id": None,
             "마감일": st.column_config.DateColumn("마감일", format="YYYY-MM-DD"),
             "김 대리 업무": st.column_config.CheckboxColumn("김 대리 업무"),
+            "완료": st.column_config.CheckboxColumn("완료", help="체크하면 달력에서 취소선으로 표시돼요"),
         },
     )
 
@@ -1634,6 +1704,7 @@ def render_deadline_tab():
         if not task:
             continue
         flag = row.get("김 대리 업무")
+        done = row.get("완료")
         deadlines.append({
             **original_by_id.get(clean(row.get("id")), {}),
             "task": task,
@@ -1641,6 +1712,7 @@ def render_deadline_tab():
             "due": parse_date(row.get("마감일")),
             "is_kim": False if flag is None or clean(flag) == "" else bool(flag),
             "due_text": clean(row.get("원문 표현")),
+            "done": False if done is None or clean(done) == "" else bool(done),
         })
 
     changed = deadlines != items
@@ -1686,17 +1758,37 @@ def render_deadline_tab():
                                         priority_items=st.session_state.get("priority_items", [])),
                         unsafe_allow_html=True)
             st.markdown(CAL_CSS + priority_legend_html(), unsafe_allow_html=True)
+            # 달력 체크박스 클릭 → 숨겨진 버튼을 눌러 완료 상태를 바꿈 (표의 '완료' 열과 동기화)
+            for d in dated:
+                st.button("완료", key=f"caldone_{d['id']}", on_click=toggle_done, args=(d["id"],))
+            components.html(
+                "<script>const p = window.parent;"
+                "if (!p.__ableCb) { p.__ableCb = true;"
+                "p.document.addEventListener('click', function(e) {"
+                "const cb = e.target.closest ? e.target.closest('.able-cal .cb') : null;"
+                "if (!cb) return;"
+                "const btn = p.document.querySelector('.st-key-caldone_' + cb.dataset.id + ' button');"
+                "if (btn) btn.click(); }); }</script>", height=0)
 
     if undated:
-        st.warning("📌 날짜 미정: " + " / ".join(d["task"] for d in undated))
+        with undated_area:
+            st.markdown("<style>.st-key-undated_box{background:#FFF9DB;border-radius:8px;}"
+                        ".st-key-undated_box *{color:#333;}</style>", unsafe_allow_html=True)
+            with st.container(border=True, key="undated_box"):
+                st.markdown(f"##### ⚠️ 날짜 미정 일정 ({len(undated)}건)")
+                st.caption("날짜를 고르고 '날짜 지정'을 누르면 달력에 추가돼요.")
+                for d in undated:
+                    c_task, c_who, c_date, c_btn = st.columns([4, 1.5, 2, 1.5], vertical_alignment="center")
+                    c_task.markdown(f"**{d['task']}**")
+                    c_who.caption(f"👤 {d['assignee'] or '담당자 미정'}")
+                    key = f"undated_date_{d['id']}"
+                    c_date.date_input("날짜", value=today, key=key, label_visibility="collapsed")
+                    c_btn.button("📅 날짜 지정", key=f"undated_btn_{d['id']}", on_click=set_due_date,
+                                 args=(d["id"], key), use_container_width=True)
 
-    b1, b2 = st.columns(2)
-    b1.download_button("📥 캘린더 파일(.ics) 받기", data=make_ics(deadlines),
+    st.download_button("📥 캘린더 파일(.ics) 받기", data=make_ics(deadlines),
                        file_name="able_deadlines.ics", mime="text/calendar",
                        use_container_width=True, disabled=not dated)
-    if b2.button("🔄 업무 다시 추출", use_container_width=True):
-        st.session_state.analyze_request = "redo"   # 브리핑 없이 다시 추출
-        st.rerun()
     return deadlines
 
 # ---------------------------------------------------------------
