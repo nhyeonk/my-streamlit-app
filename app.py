@@ -1609,13 +1609,15 @@ def render_deadline_tab():
 
     st.markdown("##### ✏️ 마감 일정 목록 (수정 · 추가 · 삭제 가능)")
     st.caption("AI가 찾은 결과는 틀릴 수 있어요. 표에서 직접 고치면 달력과 에이블의 답변에 바로 반영됩니다.")
+    # 목록이 비어 있어도(분석 전) 열 타입이 맞도록 자료형을 직접 지정한다.
+    # 빈 리스트는 pandas가 float64로 만들어 체크박스/텍스트 열 설정과 충돌하기 때문.
     df = pd.DataFrame({
-        "id": [i["id"] for i in items],
-        "업무": [i["task"] for i in items],
-        "담당자": [i["assignee"] for i in items],
-        "마감일": pd.to_datetime([i["due"] for i in items]),
-        "김 대리 업무": [i["is_kim"] for i in items],
-        "원문 표현": [i["due_text"] for i in items],
+        "id": pd.Series([i["id"] for i in items], dtype="object"),
+        "업무": pd.Series([i["task"] for i in items], dtype="object"),
+        "담당자": pd.Series([i["assignee"] for i in items], dtype="object"),
+        "마감일": pd.Series(pd.to_datetime([i["due"] for i in items]), dtype="datetime64[ns]"),
+        "김 대리 업무": pd.Series([bool(i["is_kim"]) for i in items], dtype="bool"),
+        "원문 표현": pd.Series([i["due_text"] for i in items], dtype="object"),
     })
     edited = st.data_editor(
         df, num_rows="dynamic", hide_index=True, use_container_width=True,
